@@ -538,7 +538,7 @@ async function findExecutable(
         return candidate;
       if (
         entry.isDirectory() &&
-        !(wanted === 'python.exe' && entry.name.toLowerCase() === 'lib')
+        !(wanted === "python.exe" && entry.name.toLowerCase() === "lib")
       )
         queue.push(candidate);
     }
