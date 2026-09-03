@@ -609,7 +609,7 @@ async function commandDashboard(
   }
 
   dashboardPending = true;
-  void startOrObserveInstallation(ctx, home, diag).catch((err) => {
+  await startOrObserveInstallation(ctx, home, diag).catch((err) => {
     console.error(
       "[omp-skill-kit] Failed to start installation for dashboard:",
       err,
