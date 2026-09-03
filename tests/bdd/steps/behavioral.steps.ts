@@ -15,12 +15,13 @@ import {
   After,
   Before,
   Given,
+  setDefaultTimeout,
   Then,
   When,
-  setDefaultTimeout,
 } from "@cucumber/cucumber";
 
 setDefaultTimeout(30000);
+
 import { CatalogStore, loadEligibleCatalog } from "../../../src/catalog.js";
 import {
   getDashboardOverview,
@@ -45,6 +46,8 @@ let tempProfile = "";
 let mockBridgeServer: NetServer | null = null;
 let mockBridgePort = 0;
 const mockBridgeToken = "test-secret-token-123456";
+
+setDefaultTimeout(30000);
 let mockDashboardServer: HttpServer | null = null;
 let mockDashboardPort = 0;
 let openAiStub: OpenAIStubServer | null = null;

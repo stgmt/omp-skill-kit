@@ -61,64 +61,63 @@ export function runOmp(
     timeoutMs?: number;
   } = {},
 ): Promise<OmpExecResult> {
-  const { promise, resolve } = Promise.withResolvers<OmpExecResult>();
-  const startTime = Date.now();
-  const { cmd, args: prefixArgs } = resolveOmpCommand();
+  return new Promise<OmpExecResult>((resolve) => {
+    const startTime = Date.now();
+    const { cmd, args: prefixArgs } = resolveOmpCommand();
 
-  const child = spawn(cmd, [...prefixArgs, ...argv], {
-    cwd: opts.cwd,
-    env: {
-      ...process.env,
-      ...opts.env,
-    },
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+    const child = spawn(cmd, [...prefixArgs, ...argv], {
+      cwd: opts.cwd,
+      env: {
+        ...process.env,
+        ...opts.env,
+      },
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-  let stdout = "";
-  let stderr = "";
-  let killed = false;
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
 
-  const timeoutMs = opts.timeoutMs ?? 30000;
-  const timer = setTimeout(() => {
-    killed = true;
-    try {
-      if (process.platform === "win32") {
-        spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
-          windowsHide: true,
-        });
-      } else {
-        child.kill("SIGKILL");
-      }
-    } catch {}
-  }, timeoutMs);
+    const timeoutMs = opts.timeoutMs ?? 30000;
+    const timer = setTimeout(() => {
+      killed = true;
+      try {
+        if (process.platform === "win32") {
+          spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
+            windowsHide: true,
+          });
+        } else {
+          child.kill("SIGKILL");
+        }
+      } catch {}
+    }, timeoutMs);
 
-  child.stdout.on("data", (c) => {
-    stdout += c.toString("utf8");
-  });
-  child.stderr.on("data", (c) => {
-    stderr += c.toString("utf8");
-  });
+    child.stdout.on("data", (c) => {
+      stdout += c.toString("utf8");
+    });
+    child.stderr.on("data", (c) => {
+      stderr += c.toString("utf8");
+    });
 
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    resolve({
-      code: killed ? -1 : code,
-      stdout,
-      stderr,
-      durationMs: Date.now() - startTime,
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        code: killed ? -1 : code,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startTime,
+      });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({
+        code: -1,
+        stdout,
+        stderr: `${stderr}\n${err.message}`,
+        durationMs: Date.now() - startTime,
+      });
     });
   });
-
-  child.on("error", (err) => {
-    clearTimeout(timer);
-    resolve({
-      code: -1,
-      stdout,
-      stderr: `${stderr}\n${err.message}`,
-      durationMs: Date.now() - startTime,
-    });
-  });
-
-  return promise;
 }
