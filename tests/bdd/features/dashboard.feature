@@ -18,3 +18,10 @@ Feature: Upstream mega-tron dashboard
     When the dashboard command is executed
     When the installation transitions to degraded
     Then any pending dashboard queue is cleared
+
+
+  Scenario: Windows dashboard browser opener avoids a console shell
+    Given a dashboard URL for the Windows browser opener
+    When the browser opener command is resolved for Windows
+    Then the opener executable is explorer.exe
+    And the opener command does not contain a console shell

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isProcessAlive } from "../../src/install-lock.js";
 import { pathExists } from "../../src/shared/fsx.js";
@@ -44,7 +44,16 @@ async function main() {
   console.log("2. Unpacking release candidate...");
   const unpackDir = join(tempWorkspace, "candidate");
   await mkdir(unpackDir, { recursive: true });
-  const tarRes = await run(["tar", "-xzf", archivePath, "-C", unpackDir]);
+  const tarRes = await run(
+    [
+      "tar",
+      "-xzf",
+      relative(root, archivePath),
+      "-C",
+      relative(root, unpackDir).replaceAll("\\", "/"),
+    ],
+    { cwd: root },
+  );
   assert.equal(tarRes.code, 0, `tar extraction failed: ${tarRes.stderr}`);
   const pluginDir = join(unpackDir, `omp-skill-kit-${version}`);
 

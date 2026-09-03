@@ -17,6 +17,7 @@ import {
 } from "./shared/constants.js";
 import { buildXdgEnv } from "./shared/env.js";
 import { pathExists, sha256Hex } from "./shared/fsx.js";
+import { resolveBackgroundPython } from "./shared/spawn.js";
 
 export interface EndpointFile {
   protocolVersion: number;
@@ -105,6 +106,8 @@ export class RouterClient {
     const script = join(this.pluginRoot, "python", "omp_skill_kit_bridge.py");
     if (!(await pathExists(runtime)) || !(await pathExists(script)))
       return false;
+
+    runtime = await resolveBackgroundPython(runtime);
 
     // Clean up dead endpoint.json if present
     try {

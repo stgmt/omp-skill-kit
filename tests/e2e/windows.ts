@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  browserOpenCommand,
   ensureDashboard,
   getDashboardOverview,
   stopDashboard,
@@ -147,7 +148,16 @@ async function main() {
       console.log("   Unpacking candidate release archive...");
       const extractDir = join(workspaceDir, "candidate");
       await mkdir(extractDir, { recursive: true });
-      const tarRes = await run(["tar", "-xzf", archivePath, "-C", extractDir]);
+      const tarRes = await run(
+        [
+          "tar",
+          "-xzf",
+          relative(root, archivePath),
+          "-C",
+          relative(root, extractDir).replaceAll("\\", "/"),
+        ],
+        { cwd: root },
+      );
       assert.equal(tarRes.code, 0, "tar unpack failed");
       pluginDir = join(extractDir, `omp-skill-kit-${version}`);
     }
@@ -334,9 +344,10 @@ async function main() {
       timeoutMs: 15000,
     });
     console.log("    Real dashboard started:", dashInfo);
+    const dashboardPort = Number(new URL(dashInfo.url).port);
 
     // Query real overview API
-    const ov = await getDashboardOverview(7531);
+    const ov = await getDashboardOverview(dashboardPort);
     console.log("    Real dashboard /api/overview:", ov);
     assert.ok(
       ov && typeof ov === "object",
@@ -353,6 +364,20 @@ async function main() {
     // Stop real dashboard
     await stopDashboard(isolatedHome);
     console.log("    Dashboard stopped.");
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (!(await getDashboardOverview(dashboardPort, 250))) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(
+      await getDashboardOverview(dashboardPort, 250),
+      undefined,
+      "Dashboard child process still serves requests after stop",
+    );
+    assert.deepEqual(
+      browserOpenCommand(dashInfo.url, "win32"),
+      ["explorer.exe", dashInfo.url],
+      "Windows browser opener must not use a console shell",
+    );
 
     // 11. Graceful bridge shutdown & purge verification
     console.log("11. Executing bridge shutdown and purge verification...");

@@ -4,7 +4,11 @@ import { dirname, join } from "node:path";
 import type { RuntimeState } from "./runtime.js";
 import { buildXdgEnv } from "./shared/env.js";
 import { atomicWriteJson, pathExists, readJson } from "./shared/fsx.js";
-import { spawnDetached } from "./shared/spawn.js";
+import {
+  resolveBackgroundPython,
+  spawnDetached,
+  terminateProcessTree,
+} from "./shared/spawn.js";
 
 export interface DashboardFile {
   schemaVersion: number;
@@ -112,14 +116,15 @@ export async function resolveMegaTronCli(home: string): Promise<{
     ? join(venvDir, "Scripts")
     : join(venvDir, "bin");
   const directExe = join(scriptsDir, isWindows ? "mega-tron.exe" : "mega-tron");
-  if (await pathExists(directExe)) {
-    return { command: [directExe], runtimeHash: active.runtimeHash || "" };
-  }
   if (active.venv && (await pathExists(active.venv))) {
+    const backgroundPython = await resolveBackgroundPython(active.venv);
     return {
-      command: [active.venv, "-m", "mega_tron.cli"],
+      command: [backgroundPython, "-m", "mega_tron.cli"],
       runtimeHash: active.runtimeHash || "",
     };
+  }
+  if (await pathExists(directExe)) {
+    return { command: [directExe], runtimeHash: active.runtimeHash || "" };
   }
   throw new Error("mega-tron CLI not found in venv");
 }
@@ -207,32 +212,25 @@ export async function stopDashboard(home: string): Promise<void> {
   try {
     const raw = await readFile(p, "utf8");
     const file = JSON.parse(raw) as DashboardFile;
-    if (file.pid && file.pid > 0 && file.pid !== process.pid) {
-      try {
-        process.kill(file.pid, "SIGTERM");
-      } catch {
-        try {
-          process.kill(file.pid, "SIGKILL");
-        } catch {}
-      }
-    }
+    await terminateProcessTree(file.pid);
   } catch {}
   try {
     await rm(p, { force: true });
   } catch {}
 }
 
+export function browserOpenCommand(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform === "win32") return ["explorer.exe", url];
+  if (platform === "darwin") return ["open", url];
+  return ["xdg-open", url];
+}
+
 function openBrowserSafely(url: string): void {
   try {
-    const isWindows = process.platform === "win32";
-    const isMac = process.platform === "darwin";
-    if (isWindows) {
-      spawnDetached(["cmd.exe", "/c", "start", "", url], {});
-    } else if (isMac) {
-      spawnDetached(["open", url], {});
-    } else {
-      spawnDetached(["xdg-open", url], {});
-    }
+    spawnDetached(browserOpenCommand(url), {});
   } catch {}
 }
 

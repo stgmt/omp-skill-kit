@@ -39,7 +39,7 @@ import {
   uvAsset,
 } from "./shared/manifest.js";
 import { detectPlatform } from "./shared/platform.js";
-import { run } from "./shared/spawn.js";
+import { resolveBackgroundPython, run } from "./shared/spawn.js";
 
 const HOME_ENV = "OMP_SKILL_KIT_HOME";
 const RUNTIME_VERSION = "v1"; // bump when layout/state contract changes
@@ -439,7 +439,7 @@ export async function install(opts: InstallerOptions): Promise<void> {
     });
     const token = cryptoToken();
     await rm(join(home, "endpoint.json"), { force: true });
-    const pid = spawnDetachedBridge(
+    const pid = await spawnDetachedBridge(
       venvPy,
       bridgeScript,
       home,
@@ -520,17 +520,18 @@ function computeRuntimeHash(
   return h.digest("hex").slice(0, 24);
 }
 
-function spawnDetachedBridge(
+async function spawnDetachedBridge(
   python: string,
   script: string,
   home: string,
   runtimeHash: string,
   token: string,
   xdgEnv: Record<string, string>,
-): number {
+): Promise<number> {
   const out = openSync(join(home, "logs", "bridge.log"), "a");
+  const backgroundPython = await resolveBackgroundPython(python);
   const child = spawn(
-    python,
+    backgroundPython,
     [script, "--home", home, "--runtime-hash", runtimeHash, "--token", token],
     {
       detached: true,

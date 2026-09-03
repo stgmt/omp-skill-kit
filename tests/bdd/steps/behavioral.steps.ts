@@ -9,7 +9,7 @@ import {
   createServer as createNetServer,
   type Server as NetServer,
 } from "node:net";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   After,
@@ -24,6 +24,7 @@ setDefaultTimeout(30000);
 
 import { CatalogStore, loadEligibleCatalog } from "../../../src/catalog.js";
 import {
+  browserOpenCommand,
   getDashboardOverview,
   isDashboardAlive,
   stopDashboard,
@@ -52,6 +53,7 @@ const mockBridgeToken = "test-secret-token-123456";
 
 let mockDashboardServer: HttpServer | null = null;
 let mockDashboardPort = 0;
+let browserCommand: string[] = [];
 let openAiStub: OpenAIStubServer | null = null;
 let registeredCommands: string[] = [];
 const registeredCommandDefs = new Map<string, any>();
@@ -160,8 +162,17 @@ Then(
     const unpackDir = join(tempHome, "unpacked-link");
     await mkdir(unpackDir, { recursive: true });
 
-    const tarRes = await run(["tar", "-xzf", archive, "-C", unpackDir]);
-    assert.equal(tarRes.code, 0, "tar extraction failed");
+    const tarRes = await run(
+      [
+        "tar",
+        "-xzf",
+        relative(root, archive),
+        "-C",
+        relative(root, unpackDir).replaceAll("\\", "/"),
+      ],
+      { cwd: root },
+    );
+    assert.equal(tarRes.code, 0, "tar extraction failed: " + tarRes.stderr);
 
     const pluginDir = join(unpackDir, `omp-skill-kit-${pkg.version}`);
     const linkRes = await runOmp(["plugin", "link", pluginDir], {
@@ -746,6 +757,24 @@ Then("no secrets or prompt text are written to logs or state", async () => {
 });
 
 // ---- dashboard.feature ---- //
+Given("a dashboard URL for the Windows browser opener", () => {
+  browserCommand = [];
+});
+
+When("the browser opener command is resolved for Windows", () => {
+  browserCommand = browserOpenCommand("http://127.0.0.1:7531/", "win32");
+});
+
+Then("the opener executable is explorer.exe", () => {
+  assert.equal(browserCommand[0], "explorer.exe");
+});
+
+Then("the opener command does not contain a console shell", () => {
+  assert.ok(!browserCommand.includes("cmd.exe"));
+  assert.ok(!browserCommand.includes("/c"));
+  assert.ok(!browserCommand.includes("start"));
+});
+
 Given("an isolated home directory with active runtime", async () => {
   await mkdir(join(tempHome, "runtime"), { recursive: true });
   await atomicWriteJson(join(tempHome, "runtime", "active.json"), {

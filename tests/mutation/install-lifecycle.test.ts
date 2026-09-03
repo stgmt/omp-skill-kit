@@ -18,6 +18,7 @@ vi.mock("@oh-my-pi/pi-coding-agent/capability", () => ({
   loadCapability: vi.fn().mockResolvedValue({ items: [] }),
 }));
 
+import { browserOpenCommand } from "../../src/dashboard.js";
 import { DiagnosticLog, getComponentLogPaths } from "../../src/diagnostics.js";
 import {
   ensureInstaller,
@@ -187,6 +188,20 @@ describe("install-lifecycle mutation and security fuzzing", () => {
       const results = await Promise.all(promises);
       expect(results.every((r) => r.status === "started")).toBe(true);
       expect(mockSpawnDetached).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Windows opener mutation coverage", () => {
+    it.each([
+      "http://127.0.0.1:7531/",
+      "http://127.0.0.1:7531/?q=space%20and%20symbols",
+      "http://127.0.0.1:7531/?q=%26%7C%3B",
+    ])("never routes URL through cmd.exe: %s", (url) => {
+      const command = browserOpenCommand(url, "win32");
+      expect(command).toEqual(["explorer.exe", url]);
+      expect(command).not.toContain("cmd.exe");
+      expect(command).not.toContain("/c");
+      expect(command).not.toContain("start");
     });
   });
 

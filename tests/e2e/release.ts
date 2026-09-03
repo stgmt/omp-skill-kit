@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathExists } from "../../src/shared/fsx.js";
 import { run } from "../../src/shared/spawn.js";
@@ -44,7 +44,16 @@ async function main() {
     const archivePath = join(root, `omp-skill-kit-${version}.tar.gz`);
     const extractedDir = join(tempDir, "extracted");
     await mkdir(extractedDir, { recursive: true });
-    const tarRes = await run(["tar", "-xzf", archivePath, "-C", extractedDir]);
+    const tarRes = await run(
+      [
+        "tar",
+        "-xzf",
+        relative(root, archivePath),
+        "-C",
+        relative(root, extractedDir).replaceAll("\\", "/"),
+      ],
+      { cwd: root },
+    );
     assert.equal(tarRes.code, 0, "tar extraction failed");
     const pluginPath = join(extractedDir, `omp-skill-kit-${version}`);
 

@@ -333,11 +333,14 @@ describe("native extension lifecycle and commands", () => {
         socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
 
     try {
       const address = server.address();
-      if (!address || typeof address === "string") throw new Error("server address missing");
+      if (!address || typeof address === "string")
+        throw new Error("server address missing");
 
       const store = new StateStore(tempHome);
       await store.save({
