@@ -1,0 +1,69 @@
+{
+  "name": "omp-skill-kit",
+  "version": "0.1.0",
+  "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "omp",
+    "pi-extension",
+    "skill-routing",
+    "mega-tron",
+    "skills"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stgmt/omp-skill-kit.git"
+  },
+  "homepage": "https://github.com/stgmt/omp-skill-kit",
+  "bugs": {
+    "url": "https://github.com/stgmt/omp-skill-kit/issues"
+  },
+  "engines": {
+    "omp": ">=17.3.7"
+  },
+  "omp": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "skills",
+    "python",
+    "runtime-manifest.json",
+    "runtime-locks",
+    "THIRD_PARTY_NOTICES",
+    "LICENSE",
+    "audit-reports/omp-skill-kit-omp-contract.md"
+  ],
+  "scripts": {
+    "build": "bun build src/extension.ts --outfile dist/extension.js --target bun --format esm --minify && bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --minify",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests scripts package.json tsconfig.json biome.json vitest.config.ts vitest.mutation.config.ts cucumber.cjs",
+    "test": "vitest run",
+    "test:bdd": "tsx node_modules/@cucumber/cucumber/bin/cucumber-js --config cucumber.cjs",
+    "test:mutation": "vitest run --config vitest.mutation.config.ts",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:bdd && pnpm test:mutation && pnpm build",
+    "release:verify": "node scripts/verify-release.mjs"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "17.3.7",
+    "tar-stream": "^3.1.7",
+    "unzip-stream": "^0.3.1"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=17.3.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@cucumber/cucumber": "^11.2.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "@types/tar-stream": "^3.1.4",
+    "tsx": "^4.19.3"
+  },
+  "packageManager": "pnpm@11.13.0"
+}

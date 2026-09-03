@@ -1,0 +1,7 @@
+omp-skill-kit bundles integration code for the following separately licensed projects:
+
+- mega-tron - MIT License - https://github.com/mega-edo/mega-tron - pinned commit 0ed290a1df1739af5cf4291d0ad8155afc7af16b
+- uv - Apache-2.0 OR MIT - https://github.com/astral-sh/uv - pinned version 0.12.9
+- Python - PSF-2.0 - https://www.python.org/ - managed version 3.11.15
+
+The plugin downloads these artifacts at runtime and does not modify their source code.

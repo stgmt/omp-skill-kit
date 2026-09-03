@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "pluginMinOmp": ">=17.3.7",
+  "python": {
+    "version": "3.11.15",
+    "requiresPython": ">=3.11"
+  },
+  "uv": {
+    "version": "0.12.9",
+    "assets": {
+      "windows-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-x86_64-pc-windows-msvc.zip",
+        "sha256": "ddbfcee1ac615a0499f6aa97b5ec8ebdf3ee4a7714a48055ec2ba0030e3cf810"
+      },
+      "windows-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-aarch64-pc-windows-msvc.zip",
+        "sha256": "d3360363a3cb671f2c854f4ef48cf4a57fe8664f8ec6a248076d68b797a8acc0"
+      },
+      "linux-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "ec7a99cd05e0cd7f80243f135ce1361c76835cb0ee60055d14d20eba8eba1460"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-aarch64-unknown-linux-gnu.tar.gz",
+        "sha256": "c36fe17937ff6bd16dc42fc13854b5465999fcab2efe0af559381e945e3c6001"
+      },
+      "macos-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-x86_64-apple-darwin.tar.gz",
+        "sha256": "e1ca175824f1056589ce9908f7631879ebc3c36535b5e63dc06510beb370b4c1"
+      },
+      "macos-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.9/uv-aarch64-apple-darwin.tar.gz",
+        "sha256": "301f72afaf54060f92da7016cb0115bd077f43a9c8e39c1d8170a0bac80fd398"
+      }
+    }
+  },
+  "megaTron": {
+    "commit": "0ed290a1df1739af5cf4291d0ad8155afc7af16b",
+    "archiveUrl": "https://codeload.github.com/mega-edo/mega-tron/tar.gz/0ed290a1df1739af5cf4291d0ad8155afc7af16b",
+    "archiveSha256": "61d7c6b9cd1644096a0328db20c12d06eeb45716eb2b540a45af54b644da0ce5",
+    "license": "Apache-2.0"
+  },
+  "targets": {
+    "windows-x64": {
+      "uvAsset": "windows-x64",
+      "uvPlatform": "x86_64-pc-windows-msvc",
+      "lockFile": "win-x64.txt",
+      "lockSha256": "b7683270520418a4450cdd57445f16cf93a809d722216288da897eb1e9b63cd2"
+    },
+    "windows-arm64": {
+      "uvAsset": "windows-arm64",
+      "uvPlatform": "aarch64-pc-windows-msvc",
+      "emulatedFromX64": true,
+      "lockFile": "win-arm64.txt",
+      "lockSha256": "56f1c224d36ea3c7c3d4d8470dde855ed87268f04c09b5d3eb92551054b59cd4"
+    },
+    "linux-x64": {
+      "uvAsset": "linux-x64",
+      "uvPlatform": "x86_64-unknown-linux-gnu",
+      "gccLibrary": "glibc",
+      "lockFile": "linux-x64.txt",
+      "lockSha256": "285c3f76a65bf7e473d44517b05d0e86bf2027c03fac216b022d82556504b481"
+    },
+    "linux-arm64": {
+      "uvAsset": "linux-arm64",
+      "uvPlatform": "aarch64-unknown-linux-gnu",
+      "gccLibrary": "glibc",
+      "lockFile": "linux-arm64.txt",
+      "lockSha256": "e48e7620c4478fec2078328f9ac29f514a44cb39d835361fc03cb25225b20574"
+    },
+    "macos-x64": {
+      "uvAsset": "macos-x64",
+      "uvPlatform": "x86_64-apple-darwin",
+      "lockFile": "macos-x64.txt",
+      "lockSha256": "74b03db20202961c856aef0f7635ccc7e95b1e11c470baa06692a6e20d670aa0"
+    },
+    "macos-arm64": {
+      "uvAsset": "macos-arm64",
+      "uvPlatform": "aarch64-apple-darwin",
+      "lockFile": "macos-arm64.txt",
+      "lockSha256": "d48557151781f0a36ea0b90b6e7bbac3c39e60189cb3f3e2f8a2dc33b5bb5ab8"
+    }
+  }
+}
