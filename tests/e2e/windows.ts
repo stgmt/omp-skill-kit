@@ -192,11 +192,14 @@ async function main() {
       "support",
       "warmup-helper.ts",
     );
-    const warmRes = await runOmp([helperScript, isolatedHome, workspaceDir], {
-      cwd: workspaceDir,
-      env: { BUN_BE_BUN: "1", OMP_PROFILE: testProfile },
-      timeoutMs: 60000,
-    });
+    const warmRes = await run(
+      ["bun", helperScript, isolatedHome, workspaceDir],
+      {
+        cwd: workspaceDir,
+        env: { ...process.env, OMP_PROFILE: testProfile },
+        timeoutMs: 60000,
+      },
+    );
     console.log(
       "   Warmup helper output:",
       JSON.stringify(warmRes.stdout.trim() || warmRes.stderr.trim()),
