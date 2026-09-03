@@ -5,7 +5,7 @@
 `omp-skill-kit` is a native Oh My Pi (`@oh-my-pi/pi-coding-agent >=17.3.7`) extension that provides privacy-preserving, background semantic skill routing using an isolated, pinned `mega-tron` Python runtime.
 
 - **Hook-Driven Routing**: Intercepts `before_agent_start` (per user turn) to scan workspace skills (`.omp/skills`, `.agents/skills`, `.claude/skills`, `skills/`), score candidate skills against the prompt via a local Python bridge, and inject at most three skill names as a prompt hint.
-- **Names-Only Prompt Hints**: Injects only `<omp-skill-kit>Relevant skills: skill-a, skill-b</omp-skill-kit>`. Skill bodies, descriptions, and file paths are **never** injected into the system prompt, preserving context tokens and avoiding prompt pollution.
+- **Names-Only Prompt Hints**: Injects only a prompt hint with skill names (e.g. `&lt;omp-skill-kit&gt;Relevant skills: ...&lt;/omp-skill-kit&gt;`). Skill bodies, descriptions, and file paths are **never** injected into the system prompt, preserving context tokens and avoiding prompt pollution.
 - **Fail-Open Resilience**: Routing calls enforce a strict 750 ms timeout. If the bridge is initializing, degraded, slow, or offline, the extension fails open silently (`{ names: [], unavailable: true }`), never blocking or crashing the agent turn.
 - **No MCP / No External Hooks**: Exposes standard OMP slash commands (`/omp-skill-kit:*`) and bundles the `mega-tron-dashboard` skill. It registers no MCP servers and avoids foreign Claude Code hooks.
 - **Self-Contained Managed Runtime**: Automatically bootstraps an isolated Python 3.11.15 environment via `uv 0.12.9` into `~/.omp/skill-kit/runtime`, completely segregated from user system Python installations.
@@ -30,7 +30,7 @@
 │         ├── 4. RouterClient.rank() ──► [Loopback JSONL TCP]            │
 │         │                                      │                       │
 │         └── 5. Append prompt hints             ▼                       │
-│                <omp-skill-kit>...   ┌───────────────────────────────┐  │
+│                &lt;omp-skill-kit&gt;...   ┌───────────────────────────────┐  │
 │                                     │     Detached Python Bridge    │  │
 │                                     │ (python/omp_skill_kit_bridge) │  │
 │                                     │ - mega_tron.router.Router     │  │
@@ -50,7 +50,7 @@
 3. **Catalog Snapshot**: `loadEligibleCatalog(cwd)` finds eligible `SKILL.md` candidates (ignoring hidden or disabled skills). `CatalogStore` computes a deterministic SHA-256 revision hash and persists `catalog.json` under `~/.omp/skill-kit/catalogs/<revision>/`.
 4. **RPC Ranking**: `RouterClient` sends a JSONL RPC line over a loopback TCP socket (`127.0.0.1:<port>`) with the bearer token from `endpoint.json`.
 5. **Bridge Execution**: `omp_skill_kit_bridge.py` queries `mega_tron.router.Router`, scoring candidate skills against the prompt and returning the top-k matches (max 3).
-6. **Prompt Injection**: If candidates exceed confidence thresholds, the extension appends `<omp-skill-kit>Relevant skills: <name1>, <name2></omp-skill-kit>` to `systemPrompt`.
+6. **Prompt Injection**: If candidates exceed confidence thresholds, the extension appends `&lt;omp-skill-kit&gt;Relevant skills: ...&lt;/omp-skill-kit&gt;` with matching candidate names to `systemPrompt`.
 
 ### Runtime & State Isolation
 

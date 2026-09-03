@@ -115,9 +115,13 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
             }
           }
 
-          const match = systemText.match(
-            /<omp-skill-kit>Relevant skills: (.*?)<\/omp-skill-kit>/,
+          const allMatches = Array.from(
+            systemText.matchAll(
+              /<omp-skill-kit>Relevant skills: (.*?)<\/omp-skill-kit>/g,
+            ),
           );
+          const match =
+            allMatches.length > 0 ? allMatches[allMatches.length - 1] : null;
           const hasHintsBlock = Boolean(match);
           const hintsBlockText = match ? match[0] : "";
           const hintNames = match
