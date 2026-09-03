@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -314,6 +315,78 @@ describe("native extension lifecycle and commands", () => {
     expect(res).toBeUndefined();
     // Route status cleared
     expect(statusMap.get("omp-skill-kit-route")).toBeUndefined();
+  });
+
+  it("keeps catalog snapshot bookkeeping out of the prompt window", async () => {
+    const server = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as {
+          id: string;
+          op: string;
+        };
+        const result = request.op === "ping" ? "pong" : { candidates: [] };
+        socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("server address missing");
+
+      const store = new StateStore(tempHome);
+      await store.save({
+        schemaVersion: 1,
+        pluginVersion: "0.1.2",
+        runtimeHash: "verified-hash",
+        phase: "ready",
+        attempt: 1,
+        updatedAt: new Date().toISOString(),
+      });
+      await writeFile(
+        join(tempHome, "endpoint.json"),
+        JSON.stringify({
+          protocolVersion: 1,
+          runtimeHash: "verified-hash",
+          pid: process.pid,
+          port: address.port,
+          token: "test-token",
+        }),
+        "utf8",
+      );
+
+      const { api, handlers } = createMockApi();
+      extension(api);
+      const { ctx } = createMockContext();
+      const beforeAgentStart = handlers.get("before_agent_start")?.[0];
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      try {
+        await beforeAgentStart?.(
+          {
+            type: "before_agent_start",
+            prompt: "route this request",
+            systemPrompt: ["base prompt"],
+          },
+          ctx,
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining("snapshot revision"),
+          expect.anything(),
+          expect.stringContaining("entries count"),
+          expect.anything(),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("outputs complete help with all 6 commands and 4 log paths", async () => {
