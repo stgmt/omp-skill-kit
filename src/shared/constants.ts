@@ -1,6 +1,8 @@
 export const PLUGIN_NAME = "omp-skill-kit";
 export const PROTOCOL_VERSION = 1;
-export const ROUTE_TIMEOUT_MS = 750;
+export const ROUTE_TIMEOUT_MS = Number(
+  process.env.OMP_SKILL_KIT_ROUTE_TIMEOUT_MS || 2500,
+);
 export const MAX_CANDIDATES = 3;
 export const MAX_CANDIDATE_HINT_BYTES = 512;
 export const MAX_REQUEST_BYTES = 64 * 1024;
