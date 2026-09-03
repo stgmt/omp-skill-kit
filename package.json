@@ -1,6 +1,6 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
   "type": "module",
   "private": true,
@@ -21,7 +21,7 @@
     "url": "https://github.com/stgmt/omp-skill-kit/issues"
   },
   "engines": {
-    "omp": ">=17.3.7"
+    "omp": "18.1.6"
   },
   "omp": {
     "extensions": [
@@ -49,6 +49,7 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:bdd && pnpm test:mutation && pnpm build",
     "release:verify": "node scripts/verify-release.mjs",
     "release:package": "node scripts/package-release.mjs",
+    "test:e2e:lifecycle": "tsx tests/e2e/lifecycle.ts",
     "test:e2e:loader": "tsx tests/e2e/loader.ts",
     "test:e2e:windows": "tsx tests/e2e/windows.ts",
     "test:e2e:windows-sandbox": "powershell -ExecutionPolicy Bypass -File scripts/e2e/windows-sandbox.ps1",
@@ -57,12 +58,12 @@
     "test:e2e:negative": "tsx tests/e2e/negative.ts"
   },
   "dependencies": {
-    "@oh-my-pi/pi-coding-agent": "17.3.7",
+    "@oh-my-pi/pi-coding-agent": "18.1.6",
     "tar-stream": "^3.1.7",
     "unzip-stream": "^0.3.1"
   },
   "peerDependencies": {
-    "@oh-my-pi/pi-coding-agent": ">=17.3.7"
+    "@oh-my-pi/pi-coding-agent": "18.1.6"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",

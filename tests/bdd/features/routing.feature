@@ -6,3 +6,4 @@ Feature: Semantic routing and tool execution
     Then the client returns sanitized candidate skill names
     And the system prompt receives only a names-only hint block
     And no skill descriptions, file paths, or bodies leak into the prompt
+    And matched skill names appear in the footer status while descriptions, bodies, and paths remain absent

@@ -33,7 +33,7 @@ async function main() {
 
   // Retrieve OMP version
   const verRes = await runOmp(["--version"]);
-  const ompVersion = verRes.stdout.trim().split(/\s+/)[0] || "17.3.7";
+  const ompVersion = verRes.stdout.trim().split(/\s+/)[0] || "18.1.6";
 
   // Check release archive
   const archivePath = join(root, `omp-skill-kit-${version}.tar.gz`);
@@ -133,14 +133,25 @@ async function main() {
 `;
     await writeFile(join(agentDir, "models.yml"), modelsYml, "utf8");
 
-    // 5. Extract and link exact candidate release archive
-    console.log("5. Unpacking and linking exact release candidate...");
-    const extractDir = join(workspaceDir, "candidate");
-    await mkdir(extractDir, { recursive: true });
-    const tarRes = await run(["tar", "-xzf", archivePath, "-C", extractDir]);
-    assert.equal(tarRes.code, 0, "tar unpack failed");
+    // 5. Extract and link exact candidate release archive or candidate root
+    console.log("5. Resolving and linking candidate plugin...");
+    const candidateEnv = process.env.OMP_SKILL_KIT_CANDIDATE_ROOT;
+    let pluginDir: string;
+    if (candidateEnv && (await pathExists(candidateEnv))) {
+      console.log(
+        "   Using candidate root from OMP_SKILL_KIT_CANDIDATE_ROOT:",
+        candidateEnv,
+      );
+      pluginDir = candidateEnv;
+    } else {
+      console.log("   Unpacking candidate release archive...");
+      const extractDir = join(workspaceDir, "candidate");
+      await mkdir(extractDir, { recursive: true });
+      const tarRes = await run(["tar", "-xzf", archivePath, "-C", extractDir]);
+      assert.equal(tarRes.code, 0, "tar unpack failed");
+      pluginDir = join(extractDir, `omp-skill-kit-${version}`);
+    }
 
-    const pluginDir = join(extractDir, `omp-skill-kit-${version}`);
     const linkRes = await runOmp(["plugin", "link", pluginDir], {
       env: { OMP_PROFILE: testProfile },
     });

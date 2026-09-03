@@ -14,3 +14,4 @@ tmp/
 reports/
 *.tar.gz
 *.tar.gz.sha256
+/.specs/

@@ -13,6 +13,19 @@ const file = (...segments) => join(root, ...segments);
 const pkg = JSON.parse(await readFile(file("package.json"), "utf8"));
 if (pkg.private !== true) throw new Error("package must remain private; distribution is not npm");
 const version = process.env.VERSION || pkg.version;
+
+// Verify marketplace version parity
+const mkt = JSON.parse(await readFile(file(".omp-plugin", "marketplace.json"), "utf8"));
+if (mkt.metadata?.version !== pkg.version) {
+  throw new Error(`marketplace metadata.version (${mkt.metadata?.version}) does not match package.json (${pkg.version})`);
+}
+if (mkt.plugins?.[0]?.version !== pkg.version) {
+  throw new Error(`marketplace plugins[0].version (${mkt.plugins?.[0]?.version}) does not match package.json (${pkg.version})`);
+}
+
+// Verify source release tree dependencies
+await stat(file("tests", "e2e", "lifecycle.ts"));
+
 const archiveName = `omp-skill-kit-${version}.tar.gz`;
 const archivePath = file(archiveName);
 const shaPath = file(`${archiveName}.sha256`);

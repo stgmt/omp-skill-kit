@@ -28,7 +28,10 @@ import {
   isDashboardAlive,
   stopDashboard,
 } from "../../../src/dashboard.js";
-import extension from "../../../src/extension.js";
+import extension, {
+  resetLifecycleStateForTests,
+} from "../../../src/extension.js";
+import { acquireInstallLock } from "../../../src/install-lock.js";
 import { promptHash, RouterClient } from "../../../src/router-client.js";
 import { StateStore } from "../../../src/runtime.js";
 import { buildXdgEnv } from "../../../src/shared/env.js";
@@ -47,19 +50,29 @@ let mockBridgeServer: NetServer | null = null;
 let mockBridgePort = 0;
 const mockBridgeToken = "test-secret-token-123456";
 
-setDefaultTimeout(30000);
 let mockDashboardServer: HttpServer | null = null;
 let mockDashboardPort = 0;
 let openAiStub: OpenAIStubServer | null = null;
 let registeredCommands: string[] = [];
+const registeredCommandDefs = new Map<string, any>();
 let lastNotifyMessage = "";
 let lastNotifyType = "";
 let candidateNames: string[] = [];
 let clientResultUnavailable = false;
 let publishedRevision = "";
 let loadedSkills: import("../../../src/catalog.js").LoadedSkill[] = [];
+const lastStatusMap = new Map<string, string | undefined>();
+let lastTimerCallback: (() => Promise<void> | void) | null = null;
+let lastNotifications: { message: string; type?: string }[] = [];
 
 Before(async () => {
+  resetLifecycleStateForTests();
+  lastStatusMap.clear();
+  lastTimerCallback = null;
+  lastNotifications = [];
+  registeredCommands = [];
+  registeredCommandDefs.clear();
+
   tempHome = join(
     root,
     ".tmp",
@@ -67,9 +80,11 @@ Before(async () => {
   );
   tempProfile = `bdd-profile-${Date.now()}`;
   await mkdir(tempHome, { recursive: true });
+  process.env.OMP_SKILL_KIT_HOME = tempHome;
 });
 
 After(async () => {
+  resetLifecycleStateForTests();
   if (mockBridgeServer) {
     mockBridgeServer.close();
     mockBridgeServer = null;
@@ -208,6 +223,107 @@ Then("the installer launches with Bun execution flag", async () => {
   assert.doesNotMatch(res.stderr, /unknown flag: --home/);
 });
 
+When("session start is triggered in the extension", async () => {
+  resetLifecycleStateForTests();
+  process.env.OMP_SKILL_KIT_HOME = tempHome;
+  const handlers = new Map<string, Function[]>();
+  const fakeApi = {
+    on: (name: string, fn: Function) => {
+      const list = handlers.get(name) ?? [];
+      list.push(fn);
+      handlers.set(name, list);
+    },
+    registerCommand: () => {},
+  };
+  extension(fakeApi as any);
+
+  const fakeCtx = {
+    hasUI: true,
+    cwd: root,
+    ui: {
+      setStatus: (key: string, val: string | undefined) =>
+        lastStatusMap.set(key, val),
+      notify: (msg: string, type?: string) =>
+        lastNotifications.push({ message: msg, type }),
+    },
+    setInterval: (cb: any) => {
+      lastTimerCallback = cb;
+      return {} as any;
+    },
+    clearTimer: () => {},
+  };
+
+  const sessionStart = handlers.get("session_start")?.[0];
+  assert.ok(sessionStart, "session_start handler missing");
+  await sessionStart({ type: "session_start" }, fakeCtx);
+});
+
+Then("exactly one installer process is launched", () => {
+  const status = lastStatusMap.get("omp-skill-kit-install");
+  assert.ok(status, "Installation status was not set in footer");
+});
+
+Then("the footer status displays the installation progress step", () => {
+  const status = lastStatusMap.get("omp-skill-kit-install");
+  assert.ok(
+    status?.includes("omp-skill-kit: setup"),
+    `Unexpected status: ${status}`,
+  );
+});
+
+When("the state is an orphaned active phase without a live lock", async () => {
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.2",
+    runtimeHash: "hash-orphaned",
+    phase: "installing-mega-tron",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+  });
+  await rm(join(tempHome, "install.lock"), { recursive: true, force: true });
+});
+
+When("session start is triggered again", async () => {
+  lastStatusMap.clear();
+  const handlers = new Map<string, Function[]>();
+  const fakeApi = {
+    on: (name: string, fn: Function) => {
+      const list = handlers.get(name) ?? [];
+      list.push(fn);
+      handlers.set(name, list);
+    },
+    registerCommand: () => {},
+  };
+  extension(fakeApi as any);
+
+  const fakeCtx = {
+    hasUI: true,
+    cwd: root,
+    ui: {
+      setStatus: (key: string, val: string | undefined) =>
+        lastStatusMap.set(key, val),
+      notify: (msg: string, type?: string) =>
+        lastNotifications.push({ message: msg, type }),
+    },
+    setInterval: (cb: any) => {
+      lastTimerCallback = cb;
+      return {} as any;
+    },
+    clearTimer: () => {},
+  };
+
+  const sessionStart = handlers.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start" }, fakeCtx);
+});
+
+Then("the orphaned installation is restarted automatically", () => {
+  const status = lastStatusMap.get("omp-skill-kit-install");
+  assert.ok(status, "Installation status was not restarted");
+  assert.ok(status.includes("omp-skill-kit: setup"));
+});
+
 // ---- commands.feature ---- //
 Given("the native OMP extension module", async () => {
   assert.equal(typeof extension, "function");
@@ -215,12 +331,13 @@ Given("the native OMP extension module", async () => {
 
 When("the extension is registered with an isolated host context", async () => {
   registeredCommands = [];
+  registeredCommandDefs.clear();
   const fakeApi = {
     on: () => {},
     registerCommand: (name: string, def: any) => {
       registeredCommands.push(name);
+      registeredCommandDefs.set(name, def);
       if (name === "omp-skill-kit:purge") {
-        // test purge without confirm
         def.handler("", {
           ui: {
             notify: (msg: string, type: string) => {
@@ -235,19 +352,27 @@ When("the extension is registered with an isolated host context", async () => {
   extension(fakeApi as any);
 });
 
-Then("exactly five canonical omp-skill-kit commands are registered", () => {
+Then("exactly six canonical omp-skill-kit commands are registered", () => {
   const expected = [
     "omp-skill-kit:status",
     "omp-skill-kit:setup",
     "omp-skill-kit:doctor",
     "omp-skill-kit:purge",
     "omp-skill-kit:dashboard",
+    "omp-skill-kit:help",
   ];
   assert.deepEqual(registeredCommands.sort(), expected.sort());
 });
 
 Then("unprefixed command names are completely absent", () => {
-  for (const cmd of ["status", "setup", "doctor", "purge", "dashboard"]) {
+  for (const cmd of [
+    "status",
+    "setup",
+    "doctor",
+    "purge",
+    "dashboard",
+    "help",
+  ]) {
     assert.ok(
       !registeredCommands.includes(cmd),
       `Found unprefixed command: ${cmd}`,
@@ -259,6 +384,101 @@ Then("executing purge without confirmation displays a warning", () => {
   assert.ok(lastNotifyMessage.includes("use /omp-skill-kit:purge --confirm"));
   assert.equal(lastNotifyType, "warning");
 });
+
+Given("an isolated skill kit home with an ongoing installation", async () => {
+  process.env.OMP_SKILL_KIT_HOME = tempHome;
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.2",
+    runtimeHash: "",
+    phase: "downloading",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+    install: { step: "downloading-uv", startedAt: new Date().toISOString() },
+  });
+  await acquireInstallLock(tempHome, {
+    pid: process.pid,
+    token: "bdd-ongoing-token",
+    startedAt: new Date().toISOString(),
+  });
+
+  const fakeApi = {
+    on: () => {},
+    registerCommand: (name: string, def: any) => {
+      registeredCommandDefs.set(name, def);
+    },
+  };
+  extension(fakeApi as any);
+});
+
+When("setup command is executed again", async () => {
+  lastNotifications = [];
+  const fakeCtx = {
+    hasUI: true,
+    cwd: root,
+    ui: {
+      notify: (msg: string, type?: string) =>
+        lastNotifications.push({ message: msg, type }),
+      setStatus: () => {},
+    },
+    setInterval: () => ({}),
+    clearTimer: () => {},
+  };
+
+  const def = registeredCommandDefs.get("omp-skill-kit:setup");
+  assert.ok(def, "omp-skill-kit:setup command not registered");
+  await def.handler("", fakeCtx);
+});
+
+Then(
+  "setup reports that installation is already running without spawning a new process",
+  () => {
+    const notify = lastNotifications.find((n) =>
+      n.message.includes("already running"),
+    );
+    assert.ok(notify, "Notification about already running install missing");
+  },
+);
+
+When("help, status, and doctor commands are executed", async () => {
+  lastNotifications = [];
+  const fakeCtx = {
+    hasUI: true,
+    cwd: root,
+    ui: {
+      notify: (msg: string, type?: string) =>
+        lastNotifications.push({ message: msg, type }),
+      setStatus: () => {},
+    },
+    setInterval: () => ({}),
+    clearTimer: () => {},
+  };
+
+  const helpDef = registeredCommandDefs.get("omp-skill-kit:help");
+  const statusDef = registeredCommandDefs.get("omp-skill-kit:status");
+  const doctorDef = registeredCommandDefs.get("omp-skill-kit:doctor");
+
+  assert.ok(helpDef && statusDef && doctorDef);
+  await helpDef.handler("", fakeCtx);
+  await statusDef.handler("", fakeCtx);
+  await doctorDef.handler("", fakeCtx);
+});
+
+Then(
+  "each output reports the logs directory and exact component log paths",
+  () => {
+    assert.equal(lastNotifications.length, 3);
+    const helpMsg = lastNotifications[0].message;
+    const statusMsg = lastNotifications[1].message;
+    const doctorMsg = lastNotifications[2].message;
+
+    assert.ok(helpMsg.includes("extension.log"));
+    assert.ok(helpMsg.includes("installer.log"));
+    assert.ok(statusMsg.includes("logs="));
+    assert.ok(doctorMsg.includes("logs="));
+  },
+);
 
 // ---- catalog.feature ---- //
 Given(
@@ -434,6 +654,17 @@ Then(
   },
 );
 
+Then(
+  "matched skill names appear in the footer status while descriptions, bodies, and paths remain absent",
+  () => {
+    const footerText = `omp-skill-kit: skills ${candidateNames.join(", ")}`;
+    assert.ok(footerText.includes("e2e-valid-skill"));
+    assert.ok(!footerText.includes("corporate accounting"));
+    assert.ok(!footerText.includes("SKILL.md"));
+    assert.ok(!footerText.includes("Detailed accounting guide"));
+  },
+);
+
 // ---- fail-open.feature ---- //
 Given("an uninitialized or dead bridge endpoint", async () => {
   // Point to a clean home without endpoint.json or active.json
@@ -574,6 +805,110 @@ Then(
 Then("stopping the dashboard cleanly terminates the process", async () => {
   await stopDashboard(tempHome);
   assert.ok(!(await pathExists(join(tempHome, "dashboard.json"))));
+});
+
+Given("an isolated home directory with an active installation", async () => {
+  process.env.OMP_SKILL_KIT_HOME = tempHome;
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.2",
+    runtimeHash: "",
+    phase: "downloading",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+    install: { step: "downloading-uv", startedAt: new Date().toISOString() },
+  });
+  await acquireInstallLock(tempHome, {
+    pid: process.pid,
+    token: "bdd-dash-token",
+    startedAt: new Date().toISOString(),
+  });
+
+  const fakeApi = {
+    on: () => {},
+    registerCommand: (name: string, def: any) => {
+      registeredCommandDefs.set(name, def);
+    },
+  };
+  extension(fakeApi as any);
+});
+
+When("the dashboard command is executed", async () => {
+  lastNotifications = [];
+  const fakeCtx = {
+    hasUI: true,
+    cwd: root,
+    ui: {
+      notify: (msg: string, type?: string) =>
+        lastNotifications.push({ message: msg, type }),
+      setStatus: () => {},
+    },
+    setInterval: (cb: any) => {
+      lastTimerCallback = cb;
+      return {} as any;
+    },
+    clearTimer: () => {},
+  };
+
+  const def = registeredCommandDefs.get("omp-skill-kit:dashboard");
+  assert.ok(def, "dashboard command not registered");
+  await def.handler("", fakeCtx);
+});
+
+Then(
+  "the dashboard is queued to open automatically without requiring manual setup",
+  () => {
+    const notify = lastNotifications.find((n) =>
+      n.message.includes("dashboard will open automatically when ready"),
+    );
+    assert.ok(notify, "Dashboard queued message missing");
+    assert.ok(!notify.message.includes("run /omp-skill-kit:setup first"));
+  },
+);
+
+When("the installation transitions to ready", async () => {
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.2",
+    runtimeHash: "ready-hash-123",
+    phase: "ready",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+  });
+  if (lastTimerCallback) {
+    await lastTimerCallback();
+  }
+});
+
+Then("the queued dashboard is opened exactly once", () => {
+  const readyNotice = lastNotifications.find((n) =>
+    n.message.includes("automatic setup complete"),
+  );
+  assert.ok(readyNotice);
+});
+
+When("the installation transitions to degraded", async () => {
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.2",
+    runtimeHash: "",
+    phase: "degraded",
+    attempt: 2,
+    errorCode: "installer failed for test",
+    updatedAt: new Date().toISOString(),
+  });
+  if (lastTimerCallback) {
+    await lastTimerCallback();
+  }
+});
+
+Then("any pending dashboard queue is cleared", () => {
+  const failNotice = lastNotifications.find((n) => n.type === "error");
+  assert.ok(failNotice);
+  assert.ok(failNotice.message.includes("installer failed for test"));
 });
 
 // ---- windows-native.feature ---- //

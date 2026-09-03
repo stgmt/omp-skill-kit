@@ -12,20 +12,32 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { openSync, readFileSync } from "node:fs";
+import { type Dirent, openSync, readFileSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { argv } from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extractTarGzHardened, extractZipHardened } from "./archive.js";
+import { acquireInstallLock, releaseInstallLock } from "./install-lock.js";
 import { rpcCall } from "./rpc.js";
-import { initialState, StateStore } from "./runtime.js";
+import {
+  type InstallProgress,
+  initialState,
+  type Phase,
+  type RuntimeState,
+  StateStore,
+} from "./runtime.js";
 import { PROTOCOL_VERSION } from "./shared/constants.js";
 import { downloadVerified } from "./shared/download.js";
 import { buildXdgEnv } from "./shared/env.js";
 import { atomicWriteJson, pathExists, sha256Hex } from "./shared/fsx.js";
-import { loadManifest, targetSpec, uvAsset } from "./shared/manifest.js";
+import {
+  loadManifest,
+  type RuntimeManifest,
+  targetSpec,
+  uvAsset,
+} from "./shared/manifest.js";
 import { detectPlatform } from "./shared/platform.js";
 import { run } from "./shared/spawn.js";
 
@@ -58,51 +70,21 @@ function cryptoToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-/** Atomic lock: mkdir + owner file. Stale locks are broken only after the
- * owner pid is verified dead. */
-async function acquireLock(
-  lockDir: string,
-  pid: number,
-  token: string,
-): Promise<boolean> {
-  for (;;) {
-    try {
-      await mkdir(lockDir);
-      await writeFile(
-        join(lockDir, "owner.json"),
-        JSON.stringify({ pid, token, startedAt: new Date().toISOString() }),
-        "utf8",
-      );
-      return true;
-    } catch {
-      // exists
-    }
-    const ownerFile = join(lockDir, "owner.json");
-    let stale = false;
-    try {
-      const owner = JSON.parse(await readFile(ownerFile, "utf8")) as {
-        pid?: number;
-      };
-      if (typeof owner.pid !== "number") stale = true;
-      else if (!processAlive(owner.pid)) stale = true;
-    } catch {
-      stale = true;
-    }
-    if (stale) {
-      await rm(lockDir, { recursive: true, force: true });
-      continue;
-    }
-    return false; // live owner
-  }
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
+async function saveInstallProgress(
+  store: StateStore,
+  baseState: RuntimeState,
+  phase: Phase,
+  progress: InstallProgress,
+): Promise<RuntimeState> {
+  const next: RuntimeState = {
+    ...baseState,
+    schemaVersion: 1,
+    phase,
+    updatedAt: new Date().toISOString(),
+    install: progress,
+  };
+  await store.save(next);
+  return next;
 }
 
 export interface InstallerOptions {
@@ -143,8 +125,14 @@ export async function install(opts: InstallerOptions): Promise<void> {
   }
 
   await mkdir(home, { recursive: true });
-  const lockDir = join(home, "install.lock");
-  if (!(await acquireLock(lockDir, process.pid ?? 0, cryptoToken()))) {
+  const lockToken = cryptoToken();
+  const acquired = await acquireInstallLock(home, {
+    pid: process.pid,
+    token: lockToken,
+    startedAt: new Date().toISOString(),
+  });
+
+  if (!acquired) {
     log("another installer is running; exiting");
     return;
   }
@@ -171,31 +159,45 @@ export async function install(opts: InstallerOptions): Promise<void> {
     const isLinux = spec.lockFile.startsWith("linux");
     const xdgEnv = buildXdgEnv(home);
 
-    // ---- 0. state: downloading -------------------------------------------------
-    await store.save({
-      ...state,
-      schemaVersion: 1,
-      pluginVersion: version,
-      phase: "downloading",
-      attempt: state.attempt + 1,
-      updatedAt: new Date().toISOString(),
-      lastHealthyRuntimeHash: state.lastHealthyRuntimeHash,
+    // ---- 1/9. preparing --------------------------------------------------------
+    let stepStartedAt = new Date().toISOString();
+    log("step 1/9: preparing environment");
+    state = await saveInstallProgress(store, state, "downloading", {
+      step: "preparing",
+      startedAt: stepStartedAt,
     });
 
-    // ---- 1. uv (pinned asset, digest-verified, hardened extract) --------------
+    // ---- 2/9. downloading-uv ---------------------------------------------------
+    stepStartedAt = new Date().toISOString();
     const uvArchive = join(
       home,
       "downloads",
       isWindows ? "uv.zip" : "uv.tar.gz",
     );
     log(
-      `downloading uv ${manifest.uv.version} (${asset.sha256.slice(0, 12)}...)`,
+      `step 2/9: downloading uv ${manifest.uv.version} (${asset.sha256.slice(0, 12)}...)`,
     );
+    state = await saveInstallProgress(store, state, "downloading", {
+      step: "downloading-uv",
+      startedAt: stepStartedAt,
+    });
     await downloadVerified({
       url: asset.url,
       dest: uvArchive,
       sha256: asset.sha256,
+      onProgress: async (p) => {
+        log(
+          `downloading uv: ${p.downloadedBytes}${p.totalBytes ? `/${p.totalBytes}` : ""} bytes`,
+        );
+        state = await saveInstallProgress(store, state, "downloading", {
+          step: "downloading-uv",
+          startedAt: stepStartedAt,
+          downloadedBytes: p.downloadedBytes,
+          totalBytes: p.totalBytes,
+        });
+      },
     });
+
     const uvTop = join(versionRoot, ".uv-top");
     await rm(uvTop, { recursive: true, force: true });
     await mkdir(uvTop, { recursive: true });
@@ -204,19 +206,15 @@ export async function install(opts: InstallerOptions): Promise<void> {
     const uvExe = await findExecutable(uvTop, isWindows ? "uv.exe" : "uv");
     if (!uvExe) throw new Error("uv executable missing after extraction");
 
-    // ---- 2. state: installing-python -------------------------------------------
-    await store.save({
-      ...state,
-      schemaVersion: 1,
-      pluginVersion: version,
-      phase: "installing-python",
-      attempt: state.attempt + 1,
-      updatedAt: new Date().toISOString(),
-      lastHealthyRuntimeHash: state.lastHealthyRuntimeHash,
-    });
+    // ---- 3/9. installing-python ------------------------------------------------
+    stepStartedAt = new Date().toISOString();
     log(
-      `installing python ${manifest.python.version} via uv ${manifest.uv.version}`,
+      `step 3/9: installing python ${manifest.python.version} via uv ${manifest.uv.version}`,
     );
+    state = await saveInstallProgress(store, state, "installing-python", {
+      step: "installing-python",
+      startedAt: stepStartedAt,
+    });
     const pythonInstall = join(versionRoot, "python");
     const pythonEnv = {
       UV_PYTHON_INSTALL_DIR: pythonInstall,
@@ -252,7 +250,13 @@ export async function install(opts: InstallerOptions): Promise<void> {
         `managed Python version mismatch: ${(pyVersion.stdout || pyVersion.stderr).trim()}`,
       );
 
-    // ---- 3. venv ---------------------------------------------------------------
+    // ---- 4/9. creating-venv ----------------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 4/9: creating virtual environment");
+    state = await saveInstallProgress(store, state, "installing-python", {
+      step: "creating-venv",
+      startedAt: stepStartedAt,
+    });
     const venv = join(versionRoot, "venv");
     await rm(venv, { recursive: true, force: true });
     const venvRes = await run([pyExe, "-m", "venv", venv], {
@@ -269,23 +273,36 @@ export async function install(opts: InstallerOptions): Promise<void> {
     if (!(await pathExists(venvPy)))
       throw new Error(`venv python missing at ${venvPy}`);
 
-    // ---- 4. state: installing-mega-tron -----------------------------------------
-    await store.save({
-      ...state,
-      schemaVersion: 1,
-      pluginVersion: version,
-      phase: "installing-mega-tron",
-      attempt: state.attempt + 1,
-      updatedAt: new Date().toISOString(),
-      lastHealthyRuntimeHash: state.lastHealthyRuntimeHash,
+    // ---- 5/9. downloading-mega-tron --------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 5/9: downloading mega-tron source archive");
+    state = await saveInstallProgress(store, state, "installing-mega-tron", {
+      step: "downloading-mega-tron",
+      startedAt: stepStartedAt,
     });
-    log("verifying mega-tron source archive");
     const megaArchive = join(home, "downloads", "mega-tron.tar.gz");
     await downloadVerified({
       url: manifest.megaTron.archiveUrl,
       dest: megaArchive,
       sha256: manifest.megaTron.archiveSha256,
+      onProgress: async (p) => {
+        log(
+          `downloading mega-tron: ${p.downloadedBytes}${p.totalBytes ? `/${p.totalBytes}` : ""} bytes`,
+        );
+        state = await saveInstallProgress(
+          store,
+          state,
+          "installing-mega-tron",
+          {
+            step: "downloading-mega-tron",
+            startedAt: stepStartedAt,
+            downloadedBytes: p.downloadedBytes,
+            totalBytes: p.totalBytes,
+          },
+        );
+      },
     });
+
     const localLockPath = join(versionRoot, "runtime-lock.txt");
     const lockText = await readFile(lockPath, "utf8");
     const githubArchiveUrl = `https://github.com/mega-edo/mega-tron/archive/${manifest.megaTron.commit}.tar.gz`;
@@ -295,7 +312,14 @@ export async function install(opts: InstallerOptions): Promise<void> {
       .replace(manifest.megaTron.archiveUrl, localArchiveUrl)
       .replace(/^mega-tron @.*\n\s+--hash=.*\n(?:\s+# via.*\n)?/m, "");
     await writeFile(localLockPath, dependencyLock, "utf8");
-    log("installing locked dependencies");
+
+    // ---- 6/9. installing-dependencies ------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 6/9: installing locked dependencies via uv pip sync");
+    state = await saveInstallProgress(store, state, "installing-mega-tron", {
+      step: "installing-dependencies",
+      startedAt: stepStartedAt,
+    });
     const syncArgs = [
       uvExe,
       "pip",
@@ -316,9 +340,13 @@ export async function install(opts: InstallerOptions): Promise<void> {
         `pip sync failed: ${(syncRes.stderr || syncRes.stdout).slice(0, 1200)}`,
       );
 
-    // The pinned upstream archive has a Windows-incompatible duplicate
-    // Hatch force-include entry. Install its verified source tree directly
-    // after syncing every locked dependency; no source code is changed.
+    // ---- 7/9. installing-mega-tron ---------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 7/9: installing mega-tron package into venv");
+    state = await saveInstallProgress(store, state, "installing-mega-tron", {
+      step: "installing-mega-tron",
+      startedAt: stepStartedAt,
+    });
     const sourceRoot = join(versionRoot, "mega-tron-source");
     await extractTarGzHardened(megaArchive, sourceRoot);
     const sourcePackage = await findDirectoryContaining(
@@ -370,17 +398,13 @@ export async function install(opts: InstallerOptions): Promise<void> {
     }
     log(`mega-tron ${importRes.stdout.trim()} installed into venv`);
 
-    // ---- 5. state: warming (real embedder against fixture catalog) --------------
-    await store.save({
-      ...state,
-      schemaVersion: 1,
-      pluginVersion: version,
-      phase: "warming",
-      attempt: state.attempt + 1,
-      updatedAt: new Date().toISOString(),
-      lastHealthyRuntimeHash: state.lastHealthyRuntimeHash,
+    // ---- 8/9. warming-model ----------------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 8/9: warming model embedder and initial rank");
+    state = await saveInstallProgress(store, state, "warming", {
+      step: "warming-model",
+      startedAt: stepStartedAt,
     });
-    log("warming embedder + first rank");
     const bridgeScript = join(pluginRoot, "python", "omp_skill_kit_bridge.py");
     const fixtureCatalog = join(pluginRoot, "skills");
     const fixtureHash = sha256Hex("bundled-fixture");
@@ -406,7 +430,13 @@ export async function install(opts: InstallerOptions): Promise<void> {
         `warmup failed: ${(warmRes.stderr || warmRes.stdout).slice(0, 1200)}`,
       );
 
-    // ---- 6. bridge start + ping, then ready --------------------------------------
+    // ---- 9/9. starting-bridge --------------------------------------------------
+    stepStartedAt = new Date().toISOString();
+    log("step 9/9: starting bridge process and pinging");
+    state = await saveInstallProgress(store, state, "warming", {
+      step: "starting-bridge",
+      startedAt: stepStartedAt,
+    });
     const token = cryptoToken();
     await rm(join(home, "endpoint.json"), { force: true });
     const pid = spawnDetachedBridge(
@@ -438,7 +468,10 @@ export async function install(opts: InstallerOptions): Promise<void> {
       venv: venvPy,
       megaTron: megaTronExe,
     });
+
+    const { install: _removed, ...cleanState } = state;
     await store.save({
+      ...cleanState,
       schemaVersion: 1,
       pluginVersion: version,
       runtimeHash,
@@ -455,8 +488,9 @@ export async function install(opts: InstallerOptions): Promise<void> {
       err instanceof Error ? err.stack || err.message : String(err);
     log(`install failed: ${message}`);
     const failed = await store.load();
+    const { install: _removed, ...cleanFailed } = failed;
     await store.save({
-      ...failed,
+      ...cleanFailed,
       schemaVersion: 1,
       pluginVersion: version,
       phase: "degraded",
@@ -465,13 +499,13 @@ export async function install(opts: InstallerOptions): Promise<void> {
       errorCode: message.slice(0, 500),
     });
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    await releaseInstallLock(home, lockToken);
   }
 }
 
 function computeRuntimeHash(
   _pluginRoot: string,
-  manifest: Awaited<ReturnType<typeof loadManifest>>,
+  manifest: RuntimeManifest,
 ): string {
   // Deterministic hash over pin declaration only (no local paths, no stdout).
   const h = createHash("sha256");
@@ -531,22 +565,26 @@ async function findExecutable(
   const queue = [root];
   const wanted = name.toLowerCase();
   while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) break;
-    const entries = await readdir(current, { withFileTypes: true });
+    const dir = queue.shift();
+    if (!dir) continue;
+    let entries: Dirent[] = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
     for (const entry of entries) {
-      const candidate = join(current, entry.name);
-      if (entry.isFile() && entry.name.toLowerCase() === wanted)
-        return candidate;
-      if (
-        entry.isDirectory() &&
-        !(wanted === "python.exe" && entry.name.toLowerCase() === "lib")
-      )
-        queue.push(candidate);
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(full);
+      } else if (entry.isFile() && entry.name.toLowerCase() === wanted) {
+        return full;
+      }
     }
   }
   return undefined;
 }
+
 async function waitForEndpoint(
   home: string,
   timeoutMs: number,

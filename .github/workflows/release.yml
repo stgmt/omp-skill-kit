@@ -44,6 +44,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run release:package
+      - run: pnpm run test:e2e:lifecycle
       - run: node scripts/e2e/prepare-runtime.mjs
       - run: pnpm run test:e2e:windows
 

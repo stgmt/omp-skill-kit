@@ -5,6 +5,12 @@ import { dirname, resolve } from "node:path";
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024; // sanity cap (torch wheels are large)
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000; // uv + torch can be slow
+const PROGRESS_INTERVAL_BYTES = 8 * 1024 * 1024; // 8 MiB threshold
+
+export interface DownloadProgress {
+  downloadedBytes: number;
+  totalBytes?: number;
+}
 
 export interface DownloadOptions {
   url: string;
@@ -12,6 +18,7 @@ export interface DownloadOptions {
   dest: string;
   sha256?: string;
   timeoutMs?: number;
+  onProgress?: (progress: DownloadProgress) => void | Promise<void>;
 }
 
 /**
@@ -20,7 +27,13 @@ export interface DownloadOptions {
  * failure the destination is removed so a partial file never passes.
  */
 export async function downloadVerified(opts: DownloadOptions): Promise<void> {
-  const { url, dest, sha256, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const {
+    url,
+    dest,
+    sha256,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    onProgress,
+  } = opts;
   const parsed = new URL(url);
   if (parsed.protocol !== "https:")
     throw new Error(`refusing non-HTTPS download: ${url}`);
@@ -45,9 +58,23 @@ export async function downloadVerified(opts: DownloadOptions): Promise<void> {
     if (!res.ok) throw new Error(`download failed (${res.status}) for ${url}`);
     if (!res.body) throw new Error(`no response body for ${url}`);
 
+    let totalBytes: number | undefined;
+    const clHeader = res.headers.get("content-length");
+    if (clHeader) {
+      const parsedCl = Number.parseInt(clHeader, 10);
+      if (Number.isSafeInteger(parsedCl) && parsedCl >= 0) {
+        totalBytes = parsedCl;
+      }
+    }
+
+    if (onProgress) {
+      await onProgress({ downloadedBytes: 0, totalBytes });
+    }
+
     await mkdir(dirname(resolve(dest)), { recursive: true });
     const hash = createHash("sha256");
     let written = 0;
+    let lastProgressBytes = 0;
     const handle = await open(dest, "w");
     try {
       const reader = res.body.getReader();
@@ -62,6 +89,14 @@ export async function downloadVerified(opts: DownloadOptions): Promise<void> {
         }
         hash.update(value);
         await handle.write(value);
+
+        if (
+          onProgress &&
+          written - lastProgressBytes >= PROGRESS_INTERVAL_BYTES
+        ) {
+          lastProgressBytes = written;
+          await onProgress({ downloadedBytes: written, totalBytes });
+        }
       }
       await handle.sync();
       await handle.close();
@@ -69,6 +104,10 @@ export async function downloadVerified(opts: DownloadOptions): Promise<void> {
       await handle.close().catch(() => {});
       await rm(dest, { force: true });
       throw err instanceof Error ? err : new Error(`download failed: ${url}`);
+    }
+
+    if (onProgress) {
+      await onProgress({ downloadedBytes: written, totalBytes });
     }
 
     if (sha256) {
