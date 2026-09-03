@@ -1,6 +1,6 @@
 # omp-skill-kit
 
-Native Oh My Pi plugin for local skill routing with the pinned `mega-tron` runtime (0.1.0).
+Native Oh My Pi plugin for local skill routing with the pinned `mega-tron` runtime (0.1.1).
 
 ## Behavior
 

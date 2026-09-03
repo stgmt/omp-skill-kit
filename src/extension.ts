@@ -8,7 +8,6 @@ import type {
   ExtensionCommandContext,
 } from "@oh-my-pi/pi-coding-agent";
 import { CatalogStore, loadEligibleCatalog } from "./catalog.js";
-import { dashboardSummary, renderDashboard } from "./dashboard.js";
 import { promptHash, RouterClient } from "./router-client.js";
 import { StateStore } from "./runtime.js";
 import { BRIDGE_IDLE_SHUTDOWN_MS, PLUGIN_NAME } from "./shared/constants.js";
@@ -29,7 +28,12 @@ function installerPath(): string {
 
 function launchInstaller(home: string): number {
   return spawnDetached([process.execPath, installerPath(), "--home", home], {
-    env: { OMP_SKILL_KIT_INSTALLER: "1", OMP_SKILL_KIT_HOME: home },
+    env: {
+      ...process.env,
+      BUN_BE_BUN: "1",
+      OMP_SKILL_KIT_INSTALLER: "1",
+      OMP_SKILL_KIT_HOME: home,
+    },
     logFile: join(home, "logs", "installer.log"),
   });
 }
@@ -116,6 +120,15 @@ async function commandPurge(
     );
     return;
   }
+  const client = new RouterClient(home, pluginRoot());
+  try {
+    await client.shutdown();
+  } catch {}
+  try {
+    const { stopDashboard } = await import("./dashboard.js");
+    await stopDashboard(home);
+  } catch {}
+  await new Promise((r) => setTimeout(r, 600));
   await rm(home, { recursive: true, force: true });
   ctx.ui.notify(`${PLUGIN_NAME}: runtime data removed`, "info");
 }
@@ -124,7 +137,27 @@ async function commandDashboard(
   home: string,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  ctx.ui.notify(renderDashboard(await dashboardSummary(home)), "info");
+  const state = await new StateStore(home).load();
+  if (state.phase !== "ready") {
+    ctx.ui.notify(
+      `${PLUGIN_NAME}: runtime is ${state.phase}; run /${PLUGIN_NAME}:setup first`,
+      "warning",
+    );
+    return;
+  }
+  try {
+    const { ensureDashboard } = await import("./dashboard.js");
+    const info = await ensureDashboard(home, pluginRoot(), {
+      openBrowser: true,
+    });
+    ctx.ui.notify(
+      `${PLUGIN_NAME}: dashboard ${info.reused ? "reused" : "started"} at ${info.url}`,
+      "info",
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`${PLUGIN_NAME}: dashboard failed: ${msg}`, "error");
+  }
 }
 
 export default function extension(pi: ExtensionAPI): void {
@@ -139,42 +172,70 @@ export default function extension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx) => {
     try {
       const state = await new StateStore(home).load();
-      if (state.phase !== "ready") return;
+      if (state.phase !== "ready") {
+        console.error(
+          "[omp-skill-kit] state.phase is not ready:",
+          state.phase,
+          "at home:",
+          home,
+        );
+        return;
+      }
       const entries = await loadEligibleCatalog(ctx.cwd);
       const snapshot = await catalogs.publish(entries);
+      console.error(
+        "[omp-skill-kit] snapshot revision:",
+        snapshot.revision,
+        "entries count:",
+        entries.length,
+      );
       const result = await client.rank({
         prompt: event.prompt,
         promptHash: promptHash(event.prompt),
         catalogHash: snapshot.revision,
         catalogPath: join(home, "catalogs", snapshot.revision, "catalog.json"),
         topK: 3,
-        sessionId: ctx.sessionManager.getSessionId(),
+        sessionId:
+          ctx.sessionManager &&
+          typeof ctx.sessionManager.getSessionId === "function"
+            ? ctx.sessionManager.getSessionId()
+            : "ephemeral",
       });
-      if (result.unavailable || !result.names.length) return;
+      if (result.unavailable || !result.names.length) {
+        console.error(
+          "[omp-skill-kit] rank unavailable or empty:",
+          result,
+          "lastError:",
+          client.lastRouteError(),
+        );
+        return;
+      }
+      console.error("[omp-skill-kit] rank result:", result);
       return { systemPrompt: appendHints(event.systemPrompt, result.names) };
-    } catch {
+    } catch (e) {
+      console.error("[omp-skill-kit] before_agent_start error:", e);
       return;
     }
   });
 
-  pi.registerCommand("status", {
+  pi.registerCommand("omp-skill-kit:status", {
     description: "Show omp-skill-kit runtime status",
     handler: (_args, ctx) => commandStatus(home, ctx),
   });
-  pi.registerCommand("setup", {
+  pi.registerCommand("omp-skill-kit:setup", {
     description: "Install or repair the local routing runtime",
     handler: (_args, ctx) => commandSetup(home, ctx),
   });
-  pi.registerCommand("doctor", {
+  pi.registerCommand("omp-skill-kit:doctor", {
     description: "Check runtime, bridge, and catalog health",
     handler: (_args, ctx) => commandDoctor(home, ctx),
   });
-  pi.registerCommand("purge", {
+  pi.registerCommand("omp-skill-kit:purge", {
     description: "Remove runtime data (requires --confirm)",
     handler: (args, ctx) => commandPurge(args, home, ctx),
   });
-  pi.registerCommand("dashboard", {
-    description: "Show local routing dashboard summary",
+  pi.registerCommand("omp-skill-kit:dashboard", {
+    description: "Open local routing dashboard",
     handler: (_args, ctx) => commandDashboard(home, ctx),
   });
 }

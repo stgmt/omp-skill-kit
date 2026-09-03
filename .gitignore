@@ -1,5 +1,4 @@
 node_modules/
-dist/
 *.tsbuildinfo
 .env
 .env.*
@@ -13,3 +12,5 @@ tmp/
 .tmp/
 .tmp-*
 reports/
+*.tar.gz
+*.tar.gz.sha256

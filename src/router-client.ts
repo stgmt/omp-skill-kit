@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BridgeResponse,
@@ -8,12 +8,14 @@ import type {
 } from "./bridge-protocol.js";
 import { rpcCall } from "./rpc.js";
 import {
+  BRIDGE_IDLE_SHUTDOWN_MS,
   MAX_CANDIDATE_HINT_BYTES,
   MAX_CANDIDATES,
   PROTOCOL_VERSION,
   ROUTE_RESTART_CAP,
   ROUTE_TIMEOUT_MS,
 } from "./shared/constants.js";
+import { buildXdgEnv } from "./shared/env.js";
 import { pathExists, sha256Hex } from "./shared/fsx.js";
 
 export interface EndpointFile {
@@ -40,20 +42,23 @@ export class RouterClient {
   }
   async loadEndpoint(): Promise<void> {
     try {
-      const endpoint = JSON.parse(
-        await readFile(this.endpointPath(), "utf8"),
-      ) as EndpointFile;
+      const raw = await readFile(this.endpointPath(), "utf8");
+      const endpoint = JSON.parse(raw) as EndpointFile;
       this.endpoint =
         endpoint.protocolVersion === PROTOCOL_VERSION &&
         endpoint.port > 0 &&
-        endpoint.token
+        typeof endpoint.token === "string" &&
+        endpoint.token.length > 0 &&
+        typeof endpoint.pid === "number" &&
+        endpoint.pid > 0
           ? endpoint
           : undefined;
     } catch {
       this.endpoint = undefined;
     }
   }
-  async ping(timeoutMs = 2000): Promise<boolean> {
+
+  async ping(timeoutMs = 1500): Promise<boolean> {
     await this.loadEndpoint();
     if (!this.endpoint) return false;
     try {
@@ -66,9 +71,86 @@ export class RouterClient {
       return false;
     }
   }
-  async rank(payload: RankPayload): Promise<RouteResult> {
+
+  async shutdown(timeoutMs = 2000): Promise<boolean> {
     await this.loadEndpoint();
-    if (!this.endpoint) return { names: [], unavailable: true };
+    if (!this.endpoint) return true;
+    try {
+      const response = await this.call(
+        { id: randomUUID(), op: "shutdown", token: this.endpoint.token },
+        timeoutMs,
+      );
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async ensureBridge(timeoutMs = 10000): Promise<boolean> {
+    if (await this.ping(1000)) return true;
+    if (!this.pluginRoot) return false;
+
+    let runtime = "";
+    let runtimeHash = "";
+    try {
+      const active = JSON.parse(
+        await readFile(join(this.home, "runtime", "active.json"), "utf8"),
+      ) as { venv?: string; runtimeHash?: string };
+      runtime = active.venv ?? "";
+      runtimeHash = active.runtimeHash ?? "";
+    } catch {
+      return false;
+    }
+
+    const script = join(this.pluginRoot, "python", "omp_skill_kit_bridge.py");
+    if (!(await pathExists(runtime)) || !(await pathExists(script)))
+      return false;
+
+    // Clean up dead endpoint.json if present
+    try {
+      await rm(this.endpointPath(), { force: true });
+    } catch {}
+
+    const { spawnDetached } = await import("./shared/spawn.js");
+    const token = randomBytes(32).toString("hex");
+    spawnDetached(
+      [
+        runtime,
+        script,
+        "--home",
+        this.home,
+        "--runtime-hash",
+        runtimeHash,
+        "--token",
+        token,
+        "--idle-shutdown-s",
+        String(BRIDGE_IDLE_SHUTDOWN_MS / 1000),
+      ],
+      {
+        env: { ...process.env, ...buildXdgEnv(this.home) },
+        logFile: join(this.home, "logs", "bridge.log"),
+      },
+    );
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 150));
+      if (await this.ping(1000)) return true;
+    }
+
+    return false;
+  }
+
+  async rank(payload: RankPayload): Promise<RouteResult> {
+    let alive = await this.ping(500);
+    if (!alive) {
+      alive = await this.ensureBridge(5000);
+    }
+    if (!alive || !this.endpoint) {
+      this.lastError = "bridge unavailable";
+      return { names: [], unavailable: true };
+    }
+
     for (let attempt = 0; attempt <= ROUTE_RESTART_CAP; attempt++) {
       try {
         const response = await this.call(
@@ -85,21 +167,22 @@ export class RouterClient {
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error);
         if (attempt < ROUTE_RESTART_CAP) {
-          await this.restartBridge();
-          await this.loadEndpoint();
-          if (!this.endpoint) break;
+          const recovered = await this.ensureBridge(5000);
+          if (!recovered || !this.endpoint) break;
         }
       }
     }
     return { names: [], unavailable: true };
   }
+
   lastRouteError(): string | undefined {
     return this.lastError;
   }
+
   private async call(
     request: {
       id: string;
-      op: "ping" | "rank";
+      op: "ping" | "rank" | "shutdown";
       token: string;
       payload?: RankPayload;
     },
@@ -112,6 +195,7 @@ export class RouterClient {
       timeoutMs,
     });
   }
+
   private sanitize(
     candidates: Array<{ name: string; score: number }>,
   ): string[] {
@@ -130,24 +214,6 @@ export class RouterClient {
       bytes += cost;
     }
     return names;
-  }
-  private async restartBridge(): Promise<void> {
-    if (!this.pluginRoot) return;
-    let runtime = "";
-    try {
-      const active = JSON.parse(
-        await readFile(join(this.home, "runtime", "active.json"), "utf8"),
-      ) as { venv?: string };
-      runtime = active.venv ?? "";
-    } catch {
-      return;
-    }
-    const script = join(this.pluginRoot, "python", "omp_skill_kit_bridge.py");
-    if (!(await pathExists(runtime)) || !(await pathExists(script))) return;
-    const { spawnDetached } = await import("./shared/spawn.js");
-    spawnDetached([runtime, script, "--home", this.home], {
-      logFile: join(this.home, "logs", "bridge-restart.log"),
-    });
   }
 }
 

@@ -1,0 +1,19 @@
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Default</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>%SANDBOX_INPUT%</HostFolder>
+      <SandboxFolder>C:\Input</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>%SANDBOX_OUTPUT%</HostFolder>
+      <SandboxFolder>C:\Output</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -ExecutionPolicy Bypass -File C:\Input\run-sandbox-e2e.ps1</Command>
+  </LogonCommand>
+</Configuration>

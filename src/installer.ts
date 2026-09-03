@@ -23,6 +23,7 @@ import { rpcCall } from "./rpc.js";
 import { initialState, StateStore } from "./runtime.js";
 import { PROTOCOL_VERSION } from "./shared/constants.js";
 import { downloadVerified } from "./shared/download.js";
+import { buildXdgEnv } from "./shared/env.js";
 import { atomicWriteJson, pathExists, sha256Hex } from "./shared/fsx.js";
 import { loadManifest, targetSpec, uvAsset } from "./shared/manifest.js";
 import { detectPlatform } from "./shared/platform.js";
@@ -168,13 +169,7 @@ export async function install(opts: InstallerOptions): Promise<void> {
     await mkdir(versionRoot, { recursive: true });
     const isWindows = spec.lockFile.startsWith("win");
     const isLinux = spec.lockFile.startsWith("linux");
-    const xdgEnv = {
-      XDG_CONFIG_HOME: join(home, "xdg", "config"),
-      XDG_DATA_HOME: join(home, "xdg", "data"),
-      XDG_CACHE_HOME: join(home, "xdg", "cache"),
-      HF_HOME: join(home, "models"),
-      SENTENCE_TRANSFORMERS_HOME: join(home, "models", "sentence-transformers"),
-    };
+    const xdgEnv = buildXdgEnv(home);
 
     // ---- 0. state: downloading -------------------------------------------------
     await store.save({
@@ -431,11 +426,17 @@ export async function install(opts: InstallerOptions): Promise<void> {
     if (!(ping.ok && ping.result === "pong"))
       throw new Error("bridge ping failed");
 
+    const megaTronExe = isWindows
+      ? join(venv, "Scripts", "mega-tron.exe")
+      : join(venv, "bin", "mega-tron");
+
     await atomicWriteJson(join(home, "runtime", "active.json"), {
+      schemaVersion: 1,
       runtimeHash,
       versionRoot,
       python: pyExe,
       venv: venvPy,
+      megaTron: megaTronExe,
     });
     await store.save({
       schemaVersion: 1,
@@ -450,7 +451,8 @@ export async function install(opts: InstallerOptions): Promise<void> {
     });
     log("runtime ready");
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      err instanceof Error ? err.stack || err.message : String(err);
     log(`install failed: ${message}`);
     const failed = await store.load();
     await store.save({

@@ -1,5 +1,7 @@
-Feature: Native commands
-  Scenario: The extension exposes health commands
-    Given the omp-skill-kit repository exists
-    When I inspect the extension source
-    Then it registers status setup doctor purge and dashboard
+Feature: Canonical plugin commands
+  Scenario: Extension registers only canonical namespaced commands
+    Given the native OMP extension module
+    When the extension is registered with an isolated host context
+    Then exactly five canonical omp-skill-kit commands are registered
+    And unprefixed command names are completely absent
+    And executing purge without confirmation displays a warning

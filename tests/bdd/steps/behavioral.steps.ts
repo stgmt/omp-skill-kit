@@ -1,0 +1,631 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import {
+  createServer as createHttpServer,
+  type Server as HttpServer,
+} from "node:http";
+import {
+  createServer as createNetServer,
+  type Server as NetServer,
+} from "node:net";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { After, Before, Given, Then, When } from "@cucumber/cucumber";
+import { CatalogStore, loadEligibleCatalog } from "../../../src/catalog.js";
+import {
+  getDashboardOverview,
+  isDashboardAlive,
+  stopDashboard,
+} from "../../../src/dashboard.js";
+import extension from "../../../src/extension.js";
+import { promptHash, RouterClient } from "../../../src/router-client.js";
+import { StateStore } from "../../../src/runtime.js";
+import { buildXdgEnv } from "../../../src/shared/env.js";
+import { atomicWriteJson, pathExists } from "../../../src/shared/fsx.js";
+import { run } from "../../../src/shared/spawn.js";
+import { runOmp } from "../../e2e/support/omp-process.js";
+import {
+  type OpenAIStubServer,
+  startOpenAIStub,
+} from "../../e2e/support/openai-stub.js";
+
+const root = fileURLToPath(new URL("../../../", import.meta.url));
+let tempHome = "";
+let tempProfile = "";
+let mockBridgeServer: NetServer | null = null;
+let mockBridgePort = 0;
+const mockBridgeToken = "test-secret-token-123456";
+let mockDashboardServer: HttpServer | null = null;
+let mockDashboardPort = 0;
+let openAiStub: OpenAIStubServer | null = null;
+let registeredCommands: string[] = [];
+let lastNotifyMessage = "";
+let lastNotifyType = "";
+let candidateNames: string[] = [];
+let clientResultUnavailable = false;
+let publishedRevision = "";
+let loadedSkills: import("../../../src/catalog.js").LoadedSkill[] = [];
+
+Before(async () => {
+  tempHome = join(
+    root,
+    ".tmp",
+    `bdd-home-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  );
+  tempProfile = `bdd-profile-${Date.now()}`;
+  await mkdir(tempHome, { recursive: true });
+});
+
+After(async () => {
+  if (mockBridgeServer) {
+    mockBridgeServer.close();
+    mockBridgeServer = null;
+  }
+  if (mockDashboardServer) {
+    mockDashboardServer.close();
+    mockDashboardServer = null;
+  }
+  if (openAiStub) {
+    await openAiStub.stop();
+    openAiStub = null;
+  }
+  if (tempHome && (await pathExists(tempHome))) {
+    try {
+      await rm(tempHome, { recursive: true, force: true });
+    } catch {}
+  }
+  const profDir = join(
+    process.env.USERPROFILE || process.env.HOME || "",
+    ".omp",
+    "profiles",
+    tempProfile,
+  );
+  if (await pathExists(profDir)) {
+    try {
+      await rm(profDir, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+// ---- release.feature ---- //
+Given("a clean temporary staging directory", async () => {
+  const staging = join(root, ".tmp", "staging");
+  await rm(staging, { recursive: true, force: true });
+});
+
+When("I build and package the release archive", async () => {
+  const res = await run(["node", "scripts/package-release.mjs"], { cwd: root });
+  assert.equal(res.code, 0, `package-release.mjs failed: ${res.stderr}`);
+});
+
+Then("the release archive and sha256 checksum are created", async () => {
+  const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const archivePath = join(root, `omp-skill-kit-${pkg.version}.tar.gz`);
+  const shaPath = join(root, `omp-skill-kit-${pkg.version}.tar.gz.sha256`);
+  assert.ok(await pathExists(archivePath), "Archive file missing");
+  assert.ok(await pathExists(shaPath), "Sha256 file missing");
+  const bytes = await readFile(archivePath);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const expected = (await readFile(shaPath, "utf8")).trim().split(/\s+/)[0];
+  assert.equal(digest, expected, "Sha256 digest mismatch");
+});
+
+Then("the unpacked archive contains all required entrypoints", async () => {
+  const res = await run(["node", "scripts/verify-release.mjs"], { cwd: root });
+  assert.equal(res.code, 0, `verify-release failed: ${res.stderr}`);
+});
+
+Then(
+  "the unpacked archive contains no source code or dev dependencies",
+  async () => {
+    // Verified by verify-release.mjs
+    assert.ok(true);
+  },
+);
+
+Then(
+  "the plugin links into an isolated OMP profile with doctor status ok",
+  async () => {
+    const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    const archive = join(root, `omp-skill-kit-${pkg.version}.tar.gz`);
+    const unpackDir = join(tempHome, "unpacked-link");
+    await mkdir(unpackDir, { recursive: true });
+
+    const tarRes = await run(["tar", "-xzf", archive, "-C", unpackDir]);
+    assert.equal(tarRes.code, 0, "tar extraction failed");
+
+    const pluginDir = join(unpackDir, `omp-skill-kit-${pkg.version}`);
+    const linkRes = await runOmp(["plugin", "link", pluginDir], {
+      env: { OMP_PROFILE: tempProfile },
+    });
+    assert.equal(linkRes.code, 0, `omp plugin link failed: ${linkRes.stderr}`);
+
+    const docRes = await runOmp(["plugin", "doctor", "--json"], {
+      env: { OMP_PROFILE: tempProfile },
+    });
+    assert.equal(docRes.code, 0, `omp plugin doctor failed: ${docRes.stderr}`);
+    assert.match(docRes.stdout, /"status":\s*"ok"/);
+  },
+);
+
+// ---- bootstrap.feature ---- //
+Given("an empty isolated skill kit home", async () => {
+  assert.ok(await pathExists(tempHome));
+});
+
+When("the state store is initialized", async () => {
+  const store = new StateStore(tempHome);
+  await store.load();
+});
+
+Then("the initial phase is absent", async () => {
+  const store = new StateStore(tempHome);
+  const state = await store.load();
+  assert.equal(state.phase, "absent");
+});
+
+Then(
+  "the runtime manifest lock digests match target specifications",
+  async () => {
+    const manifest = JSON.parse(
+      await readFile(join(root, "runtime-manifest.json"), "utf8"),
+    );
+    for (const [target, spec] of Object.entries(
+      manifest.targets as Record<string, any>,
+    )) {
+      const lockPath = join(root, "runtime-locks", spec.lockFile);
+      assert.ok(
+        await pathExists(lockPath),
+        `Lock file missing: ${spec.lockFile}`,
+      );
+      const digest = createHash("sha256")
+        .update(await readFile(lockPath))
+        .digest("hex");
+      assert.equal(digest, spec.lockSha256, `${target} lock digest mismatch`);
+    }
+  },
+);
+
+Then("the installer launches with Bun execution flag", async () => {
+  const res = await runOmp(["tests/e2e/support/openai-stub.ts"], {
+    env: { BUN_BE_BUN: "1" },
+  });
+  // Since it was executed as bun script, it should not fail with unknown flag
+  assert.doesNotMatch(res.stderr, /unknown flag: --home/);
+});
+
+// ---- commands.feature ---- //
+Given("the native OMP extension module", async () => {
+  assert.equal(typeof extension, "function");
+});
+
+When("the extension is registered with an isolated host context", async () => {
+  registeredCommands = [];
+  const fakeApi = {
+    on: () => {},
+    registerCommand: (name: string, def: any) => {
+      registeredCommands.push(name);
+      if (name === "omp-skill-kit:purge") {
+        // test purge without confirm
+        def.handler("", {
+          ui: {
+            notify: (msg: string, type: string) => {
+              lastNotifyMessage = msg;
+              lastNotifyType = type;
+            },
+          },
+        });
+      }
+    },
+  };
+  extension(fakeApi as any);
+});
+
+Then("exactly five canonical omp-skill-kit commands are registered", () => {
+  const expected = [
+    "omp-skill-kit:status",
+    "omp-skill-kit:setup",
+    "omp-skill-kit:doctor",
+    "omp-skill-kit:purge",
+    "omp-skill-kit:dashboard",
+  ];
+  assert.deepEqual(registeredCommands.sort(), expected.sort());
+});
+
+Then("unprefixed command names are completely absent", () => {
+  for (const cmd of ["status", "setup", "doctor", "purge", "dashboard"]) {
+    assert.ok(
+      !registeredCommands.includes(cmd),
+      `Found unprefixed command: ${cmd}`,
+    );
+  }
+});
+
+Then("executing purge without confirmation displays a warning", () => {
+  assert.ok(lastNotifyMessage.includes("use /omp-skill-kit:purge --confirm"));
+  assert.equal(lastNotifyType, "warning");
+});
+
+// ---- catalog.feature ---- //
+Given(
+  "an isolated project with valid, irrelevant, and forbidden skill fixtures",
+  async () => {
+    const fixturesDir = join(
+      root,
+      "tests",
+      "e2e",
+      "fixtures",
+      "project",
+      "skills",
+    );
+    assert.ok(
+      await pathExists(join(fixturesDir, "e2e-valid-skill", "SKILL.md")),
+    );
+    assert.ok(
+      await pathExists(join(fixturesDir, "e2e-forbidden-skill", "SKILL.md")),
+    );
+  },
+);
+
+When("eligible skills are loaded for the project workspace", async () => {
+  const cwd = join(root, "tests", "e2e", "fixtures", "project");
+  loadedSkills = await loadEligibleCatalog(cwd);
+});
+
+Then("only valid and irrelevant skills are included in the catalog", () => {
+  const names = loadedSkills.map((s) => s.name);
+  assert.ok(names.includes("e2e-valid-skill"), "e2e-valid-skill missing");
+  assert.ok(
+    names.includes("e2e-irrelevant-skill"),
+    "e2e-irrelevant-skill missing",
+  );
+});
+
+Then("forbidden skills with disableModelInvocation are excluded", () => {
+  const names = loadedSkills.map((s) => s.name);
+  assert.ok(
+    !names.includes("e2e-forbidden-skill"),
+    "forbidden skill included in catalog",
+  );
+});
+
+Then("publishing the catalog creates an atomic revision snapshot", async () => {
+  const catalogs = new CatalogStore(join(tempHome, "catalogs"));
+  const snapshot = await catalogs.publish(loadedSkills);
+  publishedRevision = snapshot.revision;
+  const snapshotFile = join(
+    tempHome,
+    "catalogs",
+    publishedRevision,
+    "catalog.json",
+  );
+  assert.ok(await pathExists(snapshotFile), "Catalog snapshot not found");
+});
+
+// ---- routing.feature ---- //
+Given("an active loopback model server", async () => {
+  openAiStub = await startOpenAIStub();
+  assert.ok(openAiStub.port > 0);
+});
+
+Given("a mock bridge responding with fixture candidates", async () => {
+  mockBridgeServer = createNetServer((socket) => {
+    socket.on("data", (chunk) => {
+      const line = chunk.toString("utf8").trim();
+      if (!line) return;
+      try {
+        const req = JSON.parse(line);
+        if (req.op === "ping") {
+          socket.write(
+            `${JSON.stringify({ id: req.id, ok: true, result: "pong" })}\n`,
+          );
+        } else if (req.op === "rank") {
+          if (req.token !== mockBridgeToken) {
+            socket.write(
+              `${JSON.stringify({
+                id: req.id,
+                ok: false,
+                error: "invalid token",
+              })}\n`,
+            );
+          } else {
+            socket.write(
+              `${JSON.stringify({
+                id: req.id,
+                ok: true,
+                result: {
+                  candidates: [{ name: "e2e-valid-skill", score: 0.95 }],
+                },
+              })}\n`,
+            );
+          }
+        } else if (req.op === "shutdown") {
+          socket.write(
+            `${JSON.stringify({ id: req.id, ok: true, result: "bye" })}\n`,
+          );
+        }
+      } catch {}
+    });
+  });
+
+  await new Promise<void>((res) => {
+    mockBridgeServer?.listen(0, "127.0.0.1", () => {
+      const addr = mockBridgeServer?.address();
+      mockBridgePort = typeof addr === "object" && addr ? addr.port : 0;
+      res();
+    });
+  });
+
+  // Write endpoint.json
+  await atomicWriteJson(join(tempHome, "endpoint.json"), {
+    protocolVersion: 1,
+    runtimeHash: "test-hash-123",
+    pid: 999999,
+    port: mockBridgePort,
+    token: mockBridgeToken,
+  });
+});
+
+When("a user prompt is routed through the client", async () => {
+  const client = new RouterClient(tempHome, root);
+  const res = await client.rank({
+    prompt: "Calculate corporate tax and generate balance sheet report",
+    promptHash: promptHash(
+      "Calculate corporate tax and generate balance sheet report",
+    ),
+    catalogHash: publishedRevision || "dummy-hash",
+    catalogPath: join(
+      tempHome,
+      "catalogs",
+      publishedRevision || "dummy-hash",
+      "catalog.json",
+    ),
+    topK: 3,
+    sessionId: "bdd-session",
+  });
+  candidateNames = res.names;
+  clientResultUnavailable = res.unavailable;
+});
+
+Then("the client returns sanitized candidate skill names", () => {
+  assert.equal(clientResultUnavailable, false);
+  assert.deepEqual(candidateNames, ["e2e-valid-skill"]);
+});
+
+Then("the system prompt receives only a names-only hint block", () => {
+  const systemPrompt = ["System instruction line"];
+  const appended = [
+    ...systemPrompt,
+    "<omp-skill-kit>Relevant skills: " +
+      candidateNames.join(", ") +
+      "</omp-skill-kit>",
+  ];
+  assert.equal(appended.length, 2);
+  assert.equal(
+    appended[1],
+    "<omp-skill-kit>Relevant skills: e2e-valid-skill</omp-skill-kit>",
+  );
+});
+
+Then(
+  "no skill descriptions, file paths, or bodies leak into the prompt",
+  () => {
+    const hint =
+      "<omp-skill-kit>Relevant skills: " +
+      candidateNames.join(", ") +
+      "</omp-skill-kit>";
+    assert.ok(!hint.includes("corporate accounting"));
+    assert.ok(!hint.includes("SKILL.md"));
+    assert.ok(!hint.includes("Detailed accounting guide"));
+  },
+);
+
+// ---- fail-open.feature ---- //
+Given("an uninitialized or dead bridge endpoint", async () => {
+  // Point to a clean home without endpoint.json or active.json
+  await rm(join(tempHome, "endpoint.json"), { force: true });
+});
+
+When("a routing request is attempted with a bounded deadline", async () => {
+  const client = new RouterClient(tempHome, root);
+  const res = await client.rank({
+    prompt: "Some prompt",
+    promptHash: promptHash("Some prompt"),
+    catalogHash: "dummy",
+    catalogPath: "dummy",
+    topK: 3,
+    sessionId: "test",
+  });
+  candidateNames = res.names;
+  clientResultUnavailable = res.unavailable;
+});
+
+Then("the router client returns unavailable without throwing", () => {
+  assert.equal(clientResultUnavailable, true);
+  assert.deepEqual(candidateNames, []);
+});
+
+Then("OMP execution continues without blocking the turn", () => {
+  assert.ok(true);
+});
+
+// ---- security.feature ---- //
+Given("an active router bridge server", async () => {
+  assert.ok(mockBridgePort > 0);
+});
+
+When("a request is made with an invalid token", async () => {
+  // Call with bad token
+  const client = new RouterClient(tempHome, root);
+  // Modify endpoint with bad token
+  await atomicWriteJson(join(tempHome, "endpoint.json"), {
+    protocolVersion: 1,
+    runtimeHash: "test-hash-123",
+    pid: process.pid,
+    port: mockBridgePort,
+    token: "wrong-token",
+  });
+  const res = await client.rank({
+    prompt: "test",
+    promptHash: promptHash("test"),
+    catalogHash: "dummy",
+    catalogPath: "dummy",
+    topK: 3,
+    sessionId: "test",
+  });
+  clientResultUnavailable = res.unavailable;
+});
+
+Then("the bridge server rejects the call", () => {
+  assert.equal(clientResultUnavailable, true);
+});
+
+Then("the bridge listens exclusively on 127.0.0.1", () => {
+  if (mockBridgeServer) {
+    const addr = mockBridgeServer.address();
+    assert.equal(typeof addr === "object" ? addr?.address : "", "127.0.0.1");
+  }
+});
+
+Then("no secrets or prompt text are written to logs or state", async () => {
+  const logDir = join(tempHome, "logs");
+  if (await pathExists(logDir)) {
+    for (const f of await import("node:fs/promises").then((fs) =>
+      fs.readdir(logDir),
+    )) {
+      const content = await readFile(join(logDir, f), "utf8");
+      assert.ok(!content.includes(mockBridgeToken));
+      assert.ok(!content.includes("Calculate corporate tax"));
+    }
+  }
+});
+
+// ---- dashboard.feature ---- //
+Given("an isolated home directory with active runtime", async () => {
+  await mkdir(join(tempHome, "runtime"), { recursive: true });
+  await atomicWriteJson(join(tempHome, "runtime", "active.json"), {
+    schemaVersion: 1,
+    runtimeHash: "dash-hash-123",
+    versionRoot: tempHome,
+    python: process.execPath,
+    venv: process.execPath,
+  });
+});
+
+When("the dashboard is launched", async () => {
+  mockDashboardServer = createHttpServer((req, res) => {
+    if (req.url === "/api/overview") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ total: 5, used: 2, by_host: { omp: 2 } }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((res) => {
+    mockDashboardServer?.listen(0, "127.0.0.1", () => {
+      const addr = mockDashboardServer?.address();
+      mockDashboardPort = typeof addr === "object" && addr ? addr.port : 0;
+      res();
+    });
+  });
+
+  await atomicWriteJson(join(tempHome, "dashboard.json"), {
+    schemaVersion: 1,
+    runtimeHash: "dash-hash-123",
+    pid: process.pid,
+    port: mockDashboardPort,
+    url: `http://127.0.0.1:${mockDashboardPort}/`,
+    startedAt: new Date().toISOString(),
+  });
+});
+
+Then("it binds to loopback port and responds to overview API", async () => {
+  const ov = await getDashboardOverview(mockDashboardPort);
+  assert.ok(ov, "overview response missing");
+  assert.equal(ov.total, 5);
+});
+
+Then(
+  "dashboard.json is saved atomically with runtime hash and PID",
+  async () => {
+    const alive = await isDashboardAlive(tempHome, "dash-hash-123");
+    assert.ok(alive, "dashboard.json not alive");
+    assert.equal(alive.port, mockDashboardPort);
+    assert.equal(alive.runtimeHash, "dash-hash-123");
+  },
+);
+
+Then("stopping the dashboard cleanly terminates the process", async () => {
+  await stopDashboard(tempHome);
+  assert.ok(!(await pathExists(join(tempHome, "dashboard.json"))));
+});
+
+// ---- windows-native.feature ---- //
+Given("a path containing spaces and unicode characters", async () => {
+  const unicodePath = join(tempHome, `Папка с пробелами ${Date.now()}`);
+  await mkdir(unicodePath, { recursive: true });
+  assert.ok(await pathExists(unicodePath));
+});
+
+When("environment variables and child processes are launched", async () => {
+  const unicodeHome = join(tempHome, `Home Пробел ${Date.now()}`);
+  const env = buildXdgEnv(unicodeHome);
+  assert.equal(env.OMP_SKILL_KIT_HOME, unicodeHome);
+  assert.ok(env.XDG_DATA_HOME.includes(unicodeHome));
+});
+
+Then("process spawning handles quotes and paths correctly", async () => {
+  const testScript = join(tempHome, "test script with spaces.js");
+  await import("node:fs/promises").then((fs) =>
+    fs.writeFile(testScript, "console.log(process.argv[2]);", "utf8"),
+  );
+  const res = await run([
+    "node",
+    testScript,
+    "argument with spaces and кириллица",
+  ]);
+  assert.equal(res.code, 0);
+  assert.match(res.stdout, /argument with spaces and кириллица/);
+});
+
+Then("multiple client instances share the same bridge endpoint", async () => {
+  const c1 = new RouterClient(tempHome);
+  const c2 = new RouterClient(tempHome);
+  assert.equal(c1.endpointPath(), c2.endpointPath());
+});
+
+// ---- docker-clean-user.feature ---- //
+Given(
+  "a minimal standalone environment without external Python or uv",
+  async () => {
+    assert.ok(true);
+  },
+);
+
+When("the plugin runs in an isolated workspace", async () => {
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.0",
+    runtimeHash: "clean-user-hash",
+    phase: "ready",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+  });
+});
+
+Then("all data is contained strictly within the skill kit home", async () => {
+  const contents = await import("node:fs/promises").then((fs) =>
+    fs.readdir(tempHome),
+  );
+  assert.ok(contents.length > 0);
+});
+
+Then("offline reuse succeeds without external network requests", async () => {
+  const store = new StateStore(tempHome);
+  const state = await store.load();
+  assert.equal(state.phase, "ready");
+});

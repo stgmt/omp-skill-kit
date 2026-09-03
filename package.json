@@ -1,6 +1,6 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
   "type": "module",
   "private": true,
@@ -32,21 +32,29 @@
     "dist",
     "skills",
     "python",
-    "runtime-manifest.json",
     "runtime-locks",
-    "THIRD_PARTY_NOTICES",
+    "runtime-manifest.json",
+    "package.json",
     "LICENSE",
+    "THIRD_PARTY_NOTICES",
     "audit-reports/omp-skill-kit-omp-contract.md"
   ],
   "scripts": {
-    "build": "bun build src/extension.ts --outfile dist/extension.js --target bun --format esm --minify && bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --minify",
+    "build": "bun build src/extension.ts --outfile dist/extension.js --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-coding-agent/* --minify && bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --minify",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src tests scripts package.json tsconfig.json biome.json vitest.config.ts vitest.mutation.config.ts cucumber.cjs",
     "test": "vitest run",
     "test:bdd": "tsx node_modules/@cucumber/cucumber/bin/cucumber-js --config cucumber.cjs",
     "test:mutation": "vitest run --config vitest.mutation.config.ts",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:bdd && pnpm test:mutation && pnpm build",
-    "release:verify": "node scripts/verify-release.mjs"
+    "release:verify": "node scripts/verify-release.mjs",
+    "release:package": "node scripts/package-release.mjs",
+    "test:e2e:loader": "tsx tests/e2e/loader.ts",
+    "test:e2e:windows": "tsx tests/e2e/windows.ts",
+    "test:e2e:windows-sandbox": "powershell -ExecutionPolicy Bypass -File scripts/e2e/windows-sandbox.ps1",
+    "test:e2e:docker": "node tests/e2e/docker/run.mjs",
+    "test:e2e:release": "tsx tests/e2e/release.ts",
+    "test:e2e:negative": "tsx tests/e2e/negative.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "17.3.7",

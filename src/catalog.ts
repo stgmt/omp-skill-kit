@@ -17,6 +17,7 @@ interface CapabilitySkill {
   name: string;
   path: string;
   frontmatter?: {
+    name?: string;
     description?: string;
     hide?: boolean;
     disableModelInvocation?: boolean;
@@ -31,13 +32,81 @@ export interface LoadedSkill {
   path: string;
 }
 
+async function scanLocalProjectSkills(cwd: string): Promise<CapabilitySkill[]> {
+  const candidates = [
+    join(cwd, ".omp", "skills"),
+    join(cwd, ".agents", "skills"),
+    join(cwd, ".claude", "skills"),
+    join(cwd, "skills"),
+  ];
+  const items: CapabilitySkill[] = [];
+  const seen = new Set<string>();
+
+  for (const dir of candidates) {
+    if (!(await pathExists(dir))) continue;
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        const skillPath = join(dir, ent.name, "SKILL.md");
+        if (!(await pathExists(skillPath))) continue;
+        try {
+          const text = await readFile(skillPath, "utf8");
+          const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+          if (!fmMatch) continue;
+          const fmText = fmMatch[1];
+          const nameMatch = fmText.match(/^name:\s*(.+)$/m);
+          const descMatch = fmText.match(/^description:\s*(.+)$/m);
+          const hideMatch = fmText.match(/^hide:\s*true/m);
+          const disableMatch = fmText.match(
+            /^(?:disableModelInvocation|disable-model-invocation):\s*true/m,
+          );
+
+          const skillName = nameMatch
+            ? nameMatch[1].trim().replace(/^["`]|["`]$/g, "")
+            : ent.name;
+          if (seen.has(skillName)) continue;
+          seen.add(skillName);
+
+          const description = descMatch
+            ? descMatch[1].trim().replace(/^["`]|["`]$/g, "")
+            : "";
+          items.push({
+            name: skillName,
+            path: skillPath,
+            frontmatter: {
+              name: skillName,
+              description,
+              hide: Boolean(hideMatch),
+              disableModelInvocation: Boolean(disableMatch),
+            },
+            _source: { provider: "local-project" },
+          });
+        } catch {}
+      }
+    } catch {}
+  }
+  return items;
+}
+
 export async function loadEligibleCatalog(cwd: string): Promise<LoadedSkill[]> {
-  const { loadCapability } = await import(
-    "@oh-my-pi/pi-coding-agent/capability"
-  );
-  const result = await loadCapability<CapabilitySkill>("skills", { cwd });
+  let items: CapabilitySkill[] = [];
+  try {
+    const mod = await import("@oh-my-pi/pi-coding-agent/discovery");
+    if (typeof mod.loadCapability === "function") {
+      const result = (await mod.loadCapability("skills", { cwd })) as {
+        items?: CapabilitySkill[];
+      };
+      items = result.items ?? [];
+    }
+  } catch {}
+
+  if (!items.length) {
+    items = await scanLocalProjectSkills(cwd);
+  }
+
   const out: LoadedSkill[] = [];
-  for (const item of result.items ?? []) {
+  for (const item of items) {
     const name = String(item.name ?? "");
     const description = String(item.frontmatter?.description ?? "").trim();
     if (!safeSkillName(name) || !description) continue;
@@ -56,7 +125,7 @@ export async function loadEligibleCatalog(cwd: string): Promise<LoadedSkill[]> {
 
 export function catalogRevision(entries: LoadedSkill[]): string {
   const rows = entries
-    .map((e) => JSON.stringify([e.name, e.description, e.provider, e.path]))
+    .map((e) => JSON.stringify([e.name, e.description, e.provider]))
     .sort();
   return sha256Hex(rows.join("\n"));
 }

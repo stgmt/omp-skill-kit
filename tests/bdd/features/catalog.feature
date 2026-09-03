@@ -1,5 +1,7 @@
-Feature: Catalog filtering
-  Scenario: The catalog has a bundled routing fixture
-    Given the omp-skill-kit repository exists
-    When I inspect the skill catalog fixture
-    Then the fixture contains only a name and description
+Feature: Active catalog discovery and filtering
+  Scenario: Workspace skills discovery filters out disabled skills
+    Given an isolated project with valid, irrelevant, and forbidden skill fixtures
+    When eligible skills are loaded for the project workspace
+    Then only valid and irrelevant skills are included in the catalog
+    And forbidden skills with disableModelInvocation are excluded
+    And publishing the catalog creates an atomic revision snapshot

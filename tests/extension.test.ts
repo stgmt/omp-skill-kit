@@ -16,11 +16,11 @@ describe("native extension registration", () => {
     } as any);
     expect(events).toEqual(["session_start", "before_agent_start"]);
     expect(commands).toEqual([
-      "status",
-      "setup",
-      "doctor",
-      "purge",
-      "dashboard",
+      "omp-skill-kit:status",
+      "omp-skill-kit:setup",
+      "omp-skill-kit:doctor",
+      "omp-skill-kit:purge",
+      "omp-skill-kit:dashboard",
     ]);
   });
 });

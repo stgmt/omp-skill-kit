@@ -9,7 +9,11 @@ export interface SpawnResult {
 
 export function run(
   argv: string[],
-  opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number } = {},
+  opts: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+    timeoutMs?: number;
+  } = {},
 ): Promise<SpawnResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(argv[0], argv.slice(1), {
@@ -42,7 +46,11 @@ export function run(
 
 export function spawnDetached(
   argv: string[],
-  opts: { cwd?: string; env?: Record<string, string>; logFile?: string },
+  opts: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+    logFile?: string;
+  },
 ): number {
   const out = opts.logFile ? openSync(opts.logFile, "a") : "ignore";
   const child = spawn(argv[0], argv.slice(1), {

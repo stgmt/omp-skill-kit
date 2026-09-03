@@ -121,7 +121,20 @@ export async function extractZipHardened(
   await mkdir(dest, { recursive: true });
   // @ts-expect-error unzip-stream has no bundled declaration in some hosts.
   const unzipModule: any = await import("unzip-stream");
-  const parser = (unzipModule.default ?? unzipModule).Parse();
+  const parseFn =
+    typeof unzipModule.Parse === "function"
+      ? unzipModule.Parse
+      : typeof unzipModule.default?.Parse === "function"
+        ? unzipModule.default.Parse
+        : undefined;
+  if (!parseFn) {
+    const { run } = await import("./shared/spawn.js");
+    const res = await run(["tar", "-xf", archive, "-C", dest]);
+    if (res.code !== 0)
+      throw new UnsafeArchiveError(`tar zip extract failed: ${res.stderr}`);
+    return;
+  }
+  const parser = parseFn();
   const pending: Promise<void>[] = [];
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const source = createReadStream(archive);
