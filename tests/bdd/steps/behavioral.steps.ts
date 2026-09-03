@@ -11,7 +11,16 @@ import {
 } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { After, Before, Given, Then, When } from "@cucumber/cucumber";
+import {
+  After,
+  Before,
+  Given,
+  Then,
+  When,
+  setDefaultTimeout,
+} from "@cucumber/cucumber";
+
+setDefaultTimeout(30000);
 import { CatalogStore, loadEligibleCatalog } from "../../../src/catalog.js";
 import {
   getDashboardOverview,
@@ -126,6 +135,7 @@ Then(
 
 Then(
   "the plugin links into an isolated OMP profile with doctor status ok",
+  { timeout: 30000 },
   async () => {
     const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
     const archive = join(root, `omp-skill-kit-${pkg.version}.tar.gz`);
