@@ -13,7 +13,7 @@ Both binary and package source are synchronized to exact version **18.1.6**.
 
 ## 1. Extension Hook Surface & Handlers
 
-Only public, officially supported extension hooks are used: `session_start` and `before_agent_start`. No private internal APIs or unverified lifecycle hooks are registered.
+Only public, officially supported extension events are used: `session_start`, `before_agent_start`, `tool_result`, and `session_stop`. No private internal APIs or unverified lifecycle hooks are registered.
 
 ### `session_start`
 - **Definition**: `extensibility/shared-events.ts:28-30`
@@ -60,6 +60,13 @@ Only public, officially supported extension hooks are used: `session_start` and 
   - When a handler returns `systemPrompt` (`:1749-1753`), `currentSystemPrompt` is updated and passed to subsequent handlers.
   - Handlers returning no changes leave `systemPrompt` intact.
 - **Fail-Open Isolation**: `#runHandlerWithTimeout` (`:1736-1742`) catches timeouts and errors without throwing. `omp-skill-kit` additionally wraps ranking with internal fail-open logic (750 ms limit, fallback `{ names: [], unavailable: true }`).
+
+### `tool_result` and `session_stop`
+- **Tool result contract**: `extensibility/extensions/types.ts:939-945` defines `tool_result` with `toolCallId`, normalized `input`, result `content`, and `isError`; the public registration is `types.ts:1248`.
+- **Dispatch**: `extensibility/extensions/runner.ts:1391-1394` dispatches registered `tool_result` handlers after tool execution. This is the supported observation point for confirming that a selected skill's `SKILL.md` was actually read.
+- **Session stop contract**: `extensibility/shared-events.ts:97-107` defines `session_stop` with `messages`, `turn_id`, `session_id`, `stop_hook_active`, and an abort `signal`; the public registration is `extensions/types.ts:1225`.
+- **Stop result semantics**: `extensibility/shared-events.ts:393-403` allows only continuation-related fields. The plugin returns no stop decision; it records usage/verdict and remains fail-open.
+- **Identity**: `extensions/runner.ts:641-643` exposes `runner.sessionId` from `sessionManager.getSessionId()`; the `session_stop.session_id` field is used to join the pending route.
 
 ---
 
@@ -143,7 +150,7 @@ Only public, officially supported extension hooks are used: `session_start` and 
 ## 5. Summary of Invariants
 
 1. **Version Parity**: Host binary `omp 18.1.6` matches `node_modules/@oh-my-pi/pi-coding-agent` version `18.1.6` exactly.
-2. **Hook Integrity**: Only `session_start` and `before_agent_start` are used. No private hooks.
+2. **Hook Integrity**: Only public `session_start`, `before_agent_start`, `tool_result`, and `session_stop` events are used. No private hooks.
 3. **Fail-Open Routing**: Extension failures or timeouts (750 ms) never propagate to or block user turns.
 4. **Isolated Timers**: Progress observers use `ctx.setInterval`, protected against `uncaughtException` and auto-cleared on teardown.
 5. **Names-Only Hints**: Only candidate skill names are ever injected into `systemPrompt`. Bodies, descriptions, and file paths remain strictly excluded.

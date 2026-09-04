@@ -1,6 +1,6 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.1.2",
+  "version": "0.1.8",
   "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
   "type": "module",
   "private": true,
@@ -52,6 +52,7 @@
     "test:e2e:lifecycle": "tsx tests/e2e/lifecycle.ts",
     "test:e2e:loader": "tsx tests/e2e/loader.ts",
     "test:e2e:windows": "tsx tests/e2e/windows.ts",
+    "test:e2e:reels": "tsx tests/e2e/windows.ts --reels",
     "test:e2e:windows-sandbox": "powershell -ExecutionPolicy Bypass -File scripts/e2e/windows-sandbox.ps1",
     "test:e2e:docker": "node tests/e2e/docker/run.mjs",
     "test:e2e:release": "tsx tests/e2e/release.ts",
@@ -69,10 +70,10 @@
     "@biomejs/biome": "^2.4.15",
     "@cucumber/cucumber": "^11.2.0",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
     "@types/tar-stream": "^3.1.4",
-    "tsx": "^4.19.3"
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   },
   "packageManager": "pnpm@11.13.0"
 }

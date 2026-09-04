@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CatalogStore, loadEligibleCatalog } from "../../src/catalog.js";
 import {
   browserOpenCommand,
   ensureDashboard,
   getDashboardOverview,
   stopDashboard,
 } from "../../src/dashboard.js";
-import { RouterClient } from "../../src/router-client.js";
+import { promptHash, RouterClient } from "../../src/router-client.js";
 import { pathExists } from "../../src/shared/fsx.js";
 import { run } from "../../src/shared/spawn.js";
+import { projectIdentity } from "../../src/telemetry.js";
 import { EvidenceCollector } from "./support/evidence.js";
 import { runOmp } from "./support/omp-process.js";
 import { startOpenAIStub } from "./support/openai-stub.js";
@@ -26,8 +28,23 @@ async function main() {
   const testProfile = `skill-kit-e2e-${runId}`;
   const isolatedHome = join(root, ".tmp", "test-real-bootstrap");
   const workspaceDir = join(root, ".tmp", `workspace-${runId}`);
+  const reelsMode =
+    process.argv.includes("--reels") || process.env.OMP_REELS_E2E === "1";
+  const reelsProject =
+    process.env.OMP_REELS_PROJECT || "E:/repos/presentation-reels";
+  const workspaceCwd = reelsMode ? reelsProject : workspaceDir;
 
   await mkdir(workspaceDir, { recursive: true });
+  if (reelsMode) {
+    assert.ok(
+      await pathExists(reelsProject),
+      `Production reels project missing: ${reelsProject}`,
+    );
+    assert.ok(
+      await pathExists(join(reelsProject, ".omp", "skills")),
+      "Production reels skills directory missing",
+    );
+  }
 
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const version = pkg.version;
@@ -94,6 +111,7 @@ async function main() {
   } else {
     console.log("   Pre-existing healthy runtime found and verified.");
   }
+  await rm(join(isolatedHome, "telemetry"), { recursive: true, force: true });
 
   // Start real bridge via RouterClient.ensureBridge()
   console.log("2. Starting REAL Python bridge via RouterClient...");
@@ -104,7 +122,10 @@ async function main() {
 
   // Start loopback OpenAI stub model server
   console.log("3. Starting loopback OpenAI stub model server...");
-  const stub = await startOpenAIStub(0);
+  const stub = await startOpenAIStub(
+    0,
+    reelsMode ? "video-production-patterns" : undefined,
+  );
   console.log("   Stub running at:", stub.url);
 
   try {
@@ -197,10 +218,12 @@ async function main() {
       durationMs: 500,
     });
 
-    // 7. Setup workspace project skills fixtures
-    console.log("7. Populating workspace skill fixtures...");
-    const fixtureSrc = join(root, "tests", "e2e", "fixtures", "project");
-    await cp(fixtureSrc, workspaceDir, { recursive: true });
+    // 7. Use either the synthetic fixture or the real presentation-reels project.
+    console.log("7. Preparing project skills:", workspaceCwd);
+    if (!reelsMode) {
+      const fixtureSrc = join(root, "tests", "e2e", "fixtures", "project");
+      await cp(fixtureSrc, workspaceDir, { recursive: true });
+    }
 
     // Warmup bridge cache for workspace catalog so per-turn rank is under 750ms
     console.log(
@@ -214,9 +237,9 @@ async function main() {
       "warmup-helper.ts",
     );
     const warmRes = await run(
-      ["bun", helperScript, isolatedHome, workspaceDir],
+      ["bun", helperScript, isolatedHome, workspaceCwd],
       {
-        cwd: workspaceDir,
+        cwd: workspaceCwd,
         env: { ...process.env, OMP_PROFILE: testProfile },
         timeoutMs: 60000,
       },
@@ -228,17 +251,19 @@ async function main() {
     assert.equal(warmRes.code, 0, `Warmup helper failed: ${warmRes.stderr}`);
 
     // 8. Execute REAL OMP turn 1: corporate tax prompt -> should rank e2e-valid-skill
-    console.log("8. Executing REAL OMP turn with prompt (accounting/tax)...");
+    console.log("8. Executing REAL OMP turn with production reels prompt...");
     const turn1Res = await runOmp(
       [
         "-p",
         "--model",
         "omp-skill-kit-e2e/test-model",
         "--auto-approve",
-        "Calculate corporate tax and generate balance sheet report",
+        reelsMode
+          ? "Audit rendered presentation reel transitions, typography, and regression evidence"
+          : "Calculate corporate tax and generate balance sheet report",
       ],
       {
-        cwd: workspaceDir,
+        cwd: workspaceCwd,
         env: {
           OMP_PROFILE: testProfile,
           OMP_SKILL_KIT_HOME: isolatedHome,
@@ -273,8 +298,12 @@ async function main() {
       "System prompt missing <omp-skill-kit> hints block",
     );
     assert.ok(
-      r1.hintNames.includes("e2e-valid-skill"),
-      "e2e-valid-skill not in hint names",
+      r1.hintNames.includes(
+        reelsMode ? "video-production-patterns" : "e2e-valid-skill",
+      ),
+      reelsMode
+        ? "video-production-patterns not in production hint names"
+        : "e2e-valid-skill not in hint names",
     );
     assert.equal(
       r1.hasDescription,
@@ -305,7 +334,7 @@ async function main() {
         "What is the speed of light in vacuum?",
       ],
       {
-        cwd: workspaceDir,
+        cwd: workspaceCwd,
         env: {
           OMP_PROFILE: testProfile,
           OMP_SKILL_KIT_HOME: isolatedHome,
@@ -336,8 +365,92 @@ async function main() {
       durationMs: turn2Res.durationMs,
     });
 
-    // 10. Launch REAL upstream mega-tron dashboard from venv
-    console.log("10. Launching REAL upstream mega-tron dashboard from venv...");
+    // 10. Verify durable usage feedback and explicit verdict before opening dashboard.
+    const feedbackPath = join(isolatedHome, "telemetry", "feedback.json");
+    assert.ok(await pathExists(feedbackPath), "Durable feedback file missing");
+    const feedback = JSON.parse(await readFile(feedbackPath, "utf8")) as Record<
+      string,
+      Record<string, Record<string, number>>
+    >;
+    const feedbackSkills = Object.values(feedback).flatMap((project) =>
+      Object.values(project),
+    );
+    assert.ok(
+      feedbackSkills.some((stats) => Number(stats.helpful) >= 1),
+      "Helpful verdict was not persisted",
+    );
+    const feedbackProject = projectIdentity(workspaceCwd);
+    assert.ok(
+      feedbackProject.id in feedback,
+      `Feedback project identity mismatch: expected ${feedbackProject.id}, got ${Object.keys(feedback).join(",")}`,
+    );
+    const feedbackSkillName = reelsMode
+      ? "video-production-patterns"
+      : "e2e-valid-skill";
+    const feedbackEntry = (await loadEligibleCatalog(workspaceCwd)).find(
+      (entry) => entry.name === feedbackSkillName,
+    );
+    assert.ok(
+      feedbackEntry,
+      `Feedback skill missing from catalog: ${feedbackSkillName}`,
+    );
+    const feedbackCatalog = await new CatalogStore(
+      join(isolatedHome, "catalogs"),
+    ).publish([feedbackEntry]);
+    const feedbackPrompt = reelsMode
+      ? "Audit rendered presentation reel transitions, typography, and regression evidence"
+      : "Calculate corporate tax and generate balance sheet report";
+    const feedbackDeadline = Date.now() + 5_000;
+    let reranked = await client.rank({
+      prompt: feedbackPrompt,
+      promptHash: promptHash(feedbackPrompt),
+      catalogHash: feedbackCatalog.revision,
+      catalogPath: join(
+        isolatedHome,
+        "catalogs",
+        feedbackCatalog.revision,
+        "catalog.json",
+      ),
+      topK: 3,
+      sessionId: "feedback-proof",
+      routeId: "feedback-proof",
+      projectId: feedbackProject.id,
+      projectName: feedbackProject.name,
+    });
+    while (!reranked.feedbackApplied && Date.now() < feedbackDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      reranked = await client.rank({
+        prompt: feedbackPrompt,
+        promptHash: promptHash(feedbackPrompt),
+        catalogHash: feedbackCatalog.revision,
+        catalogPath: join(
+          isolatedHome,
+          "catalogs",
+          feedbackCatalog.revision,
+          "catalog.json",
+        ),
+        topK: 3,
+        sessionId: "feedback-proof",
+        routeId: "feedback-proof",
+        projectId: feedbackProject.id,
+        projectName: feedbackProject.name,
+      });
+    }
+    assert.equal(
+      reranked.feedbackApplied,
+      true,
+      "Helpful verdict did not affect the next ranking within 5 seconds",
+    );
+    evidence.addScenario({
+      name: reelsMode
+        ? "production_skill_usage_and_verdict"
+        : "skill_usage_and_verdict",
+      status: "passed",
+      durationMs: 200,
+    });
+
+    // 11. Launch REAL upstream mega-tron dashboard through the OMP adapter.
+    console.log("11. Launching REAL upstream mega-tron dashboard from venv...");
     const dashInfo = await ensureDashboard(isolatedHome, root, {
       openBrowser: false,
       printMode: true,
@@ -349,13 +462,38 @@ async function main() {
     // Query real overview API
     const ov = await getDashboardOverview(dashboardPort);
     console.log("    Real dashboard /api/overview:", ov);
+    if (reelsMode) {
+      assert.ok(
+        ov && typeof ov.omp === "object",
+        "OMP dashboard adapter data missing",
+      );
+      const byHost = (ov.by_host || {}) as Record<string, unknown>;
+      assert.ok(
+        Number(byHost.omp) >= 1,
+        "OMP host missing from dashboard overview",
+      );
+      assert.equal(
+        Number(ov.omp_unknown_host_count || 0),
+        0,
+        "OMP routes remain unknown hosts",
+      );
+      const ompOverview = (await fetch(
+        `http://127.0.0.1:${dashboardPort}/api/omp/overview`,
+      ).then((response) => response.json())) as Record<string, unknown>;
+      assert.ok(
+        Number(ompOverview.routes) >= 1,
+        "Project-aware OMP route analytics missing",
+      );
+    }
     assert.ok(
       ov && typeof ov === "object",
       "Dashboard overview returned invalid response",
     );
 
     evidence.addScenario({
-      name: "real_upstream_dashboard_overview",
+      name: reelsMode
+        ? "production_omp_dashboard_adapter_overview"
+        : "real_upstream_dashboard_overview",
       status: "passed",
       durationMs: 1200,
       details: { url: dashInfo.url, pid: dashInfo.pid, overview: ov },
@@ -379,7 +517,7 @@ async function main() {
       "Windows browser opener must not use a console shell",
     );
 
-    // 11. Graceful bridge shutdown & purge verification
+    // 12. Graceful bridge shutdown & purge verification
     console.log("11. Executing bridge shutdown and purge verification...");
     const shutdownOk = await client.shutdown(3000);
     assert.ok(shutdownOk, "Bridge shutdown RPC failed");

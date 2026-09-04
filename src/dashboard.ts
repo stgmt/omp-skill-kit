@@ -17,6 +17,7 @@ export interface DashboardFile {
   port: number;
   url: string;
   startedAt: string;
+  upstreamPid?: number;
 }
 
 export interface DashboardSummary {
@@ -131,7 +132,7 @@ export async function resolveMegaTronCli(home: string): Promise<{
 
 export async function ensureDashboard(
   home: string,
-  _pluginRoot?: string,
+  pluginRoot?: string,
   opts: {
     openBrowser?: boolean;
     printMode?: boolean;
@@ -147,7 +148,18 @@ export async function ensureDashboard(
     return { url: alive.url, pid: alive.pid, reused: true };
   }
 
-  const port = await findFreeLoopbackPort(7531);
+  const upstreamPort = await findFreeLoopbackPort(7531);
+  const adapterScript = pluginRoot
+    ? join(pluginRoot, "python", "omp_skill_kit_dashboard_adapter.py")
+    : "";
+  const useAdapter = Boolean(
+    pluginRoot &&
+      (await pathExists(adapterScript)) &&
+      !command[0].toLowerCase().endsWith("mega-tron.exe"),
+  );
+  const publicPort = useAdapter
+    ? await findFreeLoopbackPort(upstreamPort + 1)
+    : upstreamPort;
   const logDir = join(home, "logs");
   await import("node:fs/promises").then((fs) =>
     fs.mkdir(logDir, { recursive: true }),
@@ -160,7 +172,7 @@ export async function ensureDashboard(
       "--host",
       "127.0.0.1",
       "--port",
-      String(port),
+      String(upstreamPort),
       "--no-open",
     ],
     {
@@ -169,14 +181,14 @@ export async function ensureDashboard(
     },
   );
 
-  const url = `http://127.0.0.1:${port}/`;
+  const upstreamUrl = `http://127.0.0.1:${upstreamPort}/`;
   const timeout = opts.timeoutMs ?? 10000;
   const start = Date.now();
   let ready = false;
 
   while (Date.now() - start < timeout) {
     await new Promise((r) => setTimeout(r, 200));
-    const overview = await getDashboardOverview(port, 500);
+    const overview = await getDashboardOverview(upstreamPort, 500);
     if (overview) {
       ready = true;
       break;
@@ -185,15 +197,49 @@ export async function ensureDashboard(
 
   if (!ready) {
     throw new Error(
-      `dashboard failed to respond at ${url} within ${timeout}ms`,
+      `dashboard failed to respond at ${upstreamUrl} within ${timeout}ms`,
     );
   }
 
+  let adapterPid: number | undefined;
+  if (useAdapter) {
+    adapterPid = spawnDetached(
+      [
+        command[0],
+        adapterScript,
+        "--home",
+        home,
+        "--upstream-port",
+        String(upstreamPort),
+        "--port",
+        String(publicPort),
+      ],
+      {
+        env: { ...process.env, ...buildXdgEnv(home) },
+        logFile: join(logDir, "dashboard-adapter.log"),
+      },
+    );
+    const adapterStart = Date.now();
+    while (Date.now() - adapterStart < timeout) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (await getDashboardOverview(publicPort, 500)) break;
+    }
+    if (!(await getDashboardOverview(publicPort, 500))) {
+      await terminateProcessTree(adapterPid);
+      await terminateProcessTree(pid);
+      throw new Error(
+        `dashboard adapter failed to respond at http://127.0.0.1:${publicPort}/`,
+      );
+    }
+  }
+
+  const url = `http://127.0.0.1:${publicPort}/`;
   const fileData: DashboardFile = {
     schemaVersion: 1,
     runtimeHash,
-    pid,
-    port,
+    pid: adapterPid ?? pid,
+    upstreamPid: adapterPid ? pid : undefined,
+    port: publicPort,
     url,
     startedAt: new Date().toISOString(),
   };
@@ -203,7 +249,7 @@ export async function ensureDashboard(
     openBrowserSafely(url);
   }
 
-  return { url, pid, reused: false };
+  return { url, pid: adapterPid ?? pid, reused: false };
 }
 
 export async function stopDashboard(home: string): Promise<void> {
@@ -213,6 +259,7 @@ export async function stopDashboard(home: string): Promise<void> {
     const raw = await readFile(p, "utf8");
     const file = JSON.parse(raw) as DashboardFile;
     await terminateProcessTree(file.pid);
+    if (file.upstreamPid) await terminateProcessTree(file.upstreamPid);
   } catch {}
   try {
     await rm(p, { force: true });

@@ -172,7 +172,7 @@ Then(
       ],
       { cwd: root },
     );
-    assert.equal(tarRes.code, 0, "tar extraction failed: " + tarRes.stderr);
+    assert.equal(tarRes.code, 0, `tar extraction failed: ${tarRes.stderr}`);
 
     const pluginDir = join(unpackDir, `omp-skill-kit-${pkg.version}`);
     const linkRes = await runOmp(["plugin", "link", pluginDir], {

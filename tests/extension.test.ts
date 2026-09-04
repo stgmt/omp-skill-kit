@@ -119,13 +119,15 @@ describe("native extension lifecycle and commands", () => {
     };
   }
 
-  it("registers exactly two lifecycle events and exactly six commands", () => {
+  it("registers lifecycle events and exactly six commands", () => {
     const { api, handlers, commands } = createMockApi();
     extension(api);
 
     expect(Array.from(handlers.keys())).toEqual([
       "session_start",
       "before_agent_start",
+      "tool_result",
+      "session_stop",
     ]);
 
     expect(Array.from(commands.keys())).toEqual([
