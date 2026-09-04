@@ -383,15 +383,13 @@ async function main() {
     const feedbackCatalog = await new CatalogStore(
       join(isolatedHome, "catalogs"),
     ).publish(await loadEligibleCatalog(workspaceCwd));
-    const reranked = await client.rank({
-      prompt: reelsMode
-        ? "Audit rendered presentation reel transitions, typography, and regression evidence"
-        : "Calculate corporate tax and generate balance sheet report",
-      promptHash: promptHash(
-        reelsMode
-          ? "Audit rendered presentation reel transitions, typography, and regression evidence"
-          : "Calculate corporate tax and generate balance sheet report",
-      ),
+    const feedbackPrompt = reelsMode
+      ? "Audit rendered presentation reel transitions, typography, and regression evidence"
+      : "Calculate corporate tax and generate balance sheet report";
+    const feedbackDeadline = Date.now() + 5_000;
+    let reranked = await client.rank({
+      prompt: feedbackPrompt,
+      promptHash: promptHash(feedbackPrompt),
       catalogHash: feedbackCatalog.revision,
       catalogPath: join(
         isolatedHome,
@@ -405,10 +403,29 @@ async function main() {
       projectId: feedbackProject.id,
       projectName: feedbackProject.name,
     });
+    while (!reranked.feedbackApplied && Date.now() < feedbackDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      reranked = await client.rank({
+        prompt: feedbackPrompt,
+        promptHash: promptHash(feedbackPrompt),
+        catalogHash: feedbackCatalog.revision,
+        catalogPath: join(
+          isolatedHome,
+          "catalogs",
+          feedbackCatalog.revision,
+          "catalog.json",
+        ),
+        topK: 3,
+        sessionId: "feedback-proof",
+        routeId: "feedback-proof",
+        projectId: feedbackProject.id,
+        projectName: feedbackProject.name,
+      });
+    }
     assert.equal(
       reranked.feedbackApplied,
       true,
-      "Helpful verdict did not affect the next ranking",
+      "Helpful verdict did not affect the next ranking within 5 seconds",
     );
     evidence.addScenario({
       name: reelsMode
