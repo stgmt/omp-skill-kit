@@ -124,7 +124,10 @@ async function main() {
   console.log("   Foreign server on 7531 untouched and alive.");
 
   await stopDashboard(join(root, ".tmp", "test-real-bootstrap"));
-  foreignServer.close();
+  foreignServer.closeAllConnections();
+  await new Promise<void>((resolve, reject) => {
+    foreignServer.close((error) => (error ? reject(error) : resolve()));
+  });
 
   // 5. Invalid token -> RPC rejected
   console.log("5. Testing invalid token rejection...");
