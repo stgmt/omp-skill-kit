@@ -1,6 +1,6 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
   "type": "module",
   "private": true,
