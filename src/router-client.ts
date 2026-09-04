@@ -180,7 +180,7 @@ export class RouterClient {
             candidates: [],
             unavailable: true,
             feedbackApplied: false,
-        feedbackAdjusted: 0,
+            feedbackAdjusted: 0,
           };
         }
         const result = (response.result ?? { candidates: [] }) as RankResult;
@@ -205,7 +205,7 @@ export class RouterClient {
       candidates: [],
       unavailable: true,
       feedbackApplied: false,
-        feedbackAdjusted: 0,
+      feedbackAdjusted: 0,
     };
   }
 
