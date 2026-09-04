@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Background mega-tron skill routing for OMP: names-only candidate hints per turn.",
-    "version": "0.1.4"
+    "version": "0.1.5"
   },
   "plugins": [
     {
       "name": "omp-skill-kit",
       "source": "./",
       "description": "Native OMP plugin that routes the active skill catalog through a pinned mega-tron embedder and adds names-only candidate hints to each turn.",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "author": {
         "name": "stgmt"
       },
