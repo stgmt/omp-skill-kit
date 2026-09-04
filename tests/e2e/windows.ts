@@ -380,9 +380,23 @@ async function main() {
       "Helpful verdict was not persisted",
     );
     const feedbackProject = projectIdentity(workspaceCwd);
+    assert.ok(
+      feedbackProject.id in feedback,
+      `Feedback project identity mismatch: expected ${feedbackProject.id}, got ${Object.keys(feedback).join(",")}`,
+    );
+    const feedbackSkillName = reelsMode
+      ? "video-production-patterns"
+      : "e2e-valid-skill";
+    const feedbackEntry = (await loadEligibleCatalog(workspaceCwd)).find(
+      (entry) => entry.name === feedbackSkillName,
+    );
+    assert.ok(
+      feedbackEntry,
+      `Feedback skill missing from catalog: ${feedbackSkillName}`,
+    );
     const feedbackCatalog = await new CatalogStore(
       join(isolatedHome, "catalogs"),
-    ).publish(await loadEligibleCatalog(workspaceCwd));
+    ).publish([feedbackEntry]);
     const feedbackPrompt = reelsMode
       ? "Audit rendered presentation reel transitions, typography, and regression evidence"
       : "Calculate corporate tax and generate balance sheet report";
