@@ -52,6 +52,7 @@
     "test:e2e:lifecycle": "tsx tests/e2e/lifecycle.ts",
     "test:e2e:loader": "tsx tests/e2e/loader.ts",
     "test:e2e:windows": "tsx tests/e2e/windows.ts",
+    "test:e2e:reels": "tsx tests/e2e/windows.ts --reels",
     "test:e2e:windows-sandbox": "powershell -ExecutionPolicy Bypass -File scripts/e2e/windows-sandbox.ps1",
     "test:e2e:docker": "node tests/e2e/docker/run.mjs",
     "test:e2e:release": "tsx tests/e2e/release.ts",

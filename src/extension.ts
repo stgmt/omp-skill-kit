@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +8,8 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  SessionStopEvent,
+  ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { CatalogStore, loadEligibleCatalog } from "./catalog.js";
 import { DiagnosticLog, getComponentLogPaths } from "./diagnostics.js";
@@ -24,6 +27,13 @@ import {
 import { BRIDGE_IDLE_SHUTDOWN_MS, PLUGIN_NAME } from "./shared/constants.js";
 import { pathExists } from "./shared/fsx.js";
 import { spawnDetached } from "./shared/spawn.js";
+import {
+  type FeedbackVerdict,
+  parseFeedbackMarkers,
+  projectIdentity,
+  skillWasRead,
+  TelemetryStore,
+} from "./telemetry.js";
 
 const HOME_ENV = "OMP_SKILL_KIT_HOME";
 
@@ -72,6 +82,20 @@ let isPollRunning = false;
 let lastReportedPhase: string | undefined;
 let lastReportedStep: string | undefined;
 
+type PendingRoute = {
+  routeId: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+  turnId: string;
+  catalogRevision: string;
+  selected: string[];
+  used: Set<string>;
+  toolErrors: number;
+};
+
+const pendingRoutes = new Map<string, PendingRoute>();
+
 export function resetLifecycleStateForTests(): void {
   launchPromise = undefined;
   activeContext = undefined;
@@ -81,6 +105,7 @@ export function resetLifecycleStateForTests(): void {
   isPollRunning = false;
   lastReportedPhase = undefined;
   lastReportedStep = undefined;
+  pendingRoutes.clear();
 }
 
 export function getLifecycleStateForTests(): {
@@ -644,6 +669,71 @@ function logFailOpen(err: unknown): void {
   console.error("[omp-skill-kit] Lifecycle background error:", err);
 }
 
+function currentSessionId(ctx: ExtensionContext): string {
+  const manager = ctx.sessionManager as
+    | { getSessionId?: () => string }
+    | undefined;
+  return manager && typeof manager.getSessionId === "function"
+    ? manager.getSessionId()
+    : "ephemeral";
+}
+
+function routeStatus(
+  unavailable: boolean,
+  names: string[],
+  error?: string,
+): "matched" | "empty" | "unavailable" | "timeout" {
+  if (!unavailable) return names.length ? "matched" : "empty";
+  return error?.toLowerCase().includes("timeout") ? "timeout" : "unavailable";
+}
+
+async function settleRoute(
+  route: PendingRoute,
+  messages: unknown[],
+  telemetry: TelemetryStore,
+  client: RouterClient,
+): Promise<void> {
+  const markers = parseFeedbackMarkers(messages);
+  const used = [...route.used];
+  const verdict: FeedbackVerdict =
+    used.map((name) => markers.get(name)).find(Boolean) ?? "neutral";
+  const outcome = route.toolErrors
+    ? "failed"
+    : used.length
+      ? "completed"
+      : "unknown";
+  const usage = {
+    schemaVersion: 1 as const,
+    type: "usage" as const,
+    eventId: randomUUID(),
+    routeId: route.routeId,
+    ts: new Date().toISOString(),
+    host: "omp" as const,
+    projectId: route.projectId,
+    projectName: route.projectName,
+    sessionId: route.sessionId,
+    turnId: route.turnId,
+    catalogRevision: route.catalogRevision,
+    used,
+    toolErrors: route.toolErrors,
+    outcome: outcome as "completed" | "failed" | "unknown",
+  };
+  await telemetry.append(usage);
+  if (used.length === 0) return;
+  await telemetry.append({
+    ...usage,
+    type: "feedback",
+    verdict,
+    accepted: verdict === "helpful",
+  });
+  await client.recordFeedback({
+    routeId: route.routeId,
+    projectId: route.projectId,
+    skillNames: used,
+    verdict,
+  });
+}
+
 export default function extension(pi: ExtensionAPI): void {
   const home = homePath();
   const diag = new DiagnosticLog(home);
@@ -655,14 +745,36 @@ export default function extension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx) => {
-    if (ctx.hasUI) {
-      ctx.ui.setStatus("omp-skill-kit-route", undefined);
-    }
+    if (ctx.hasUI) ctx.ui.setStatus("omp-skill-kit-route", undefined);
+    const telemetry = new TelemetryStore(home);
+    const routeId = randomUUID();
+    const sessionId = currentSessionId(ctx);
+    const project = projectIdentity(ctx.cwd);
+    const startedAt = Date.now();
     try {
       const store = new StateStore(home);
       const state = await store.load();
       if (state.phase !== "ready") {
         await startOrObserveInstallation(ctx, home, diag).catch(logFailOpen);
+        await telemetry.append({
+          schemaVersion: 1,
+          type: "route",
+          eventId: randomUUID(),
+          routeId,
+          ts: new Date().toISOString(),
+          host: "omp",
+          projectId: project.id,
+          projectName: project.name,
+          sessionId,
+          turnId: routeId,
+          catalogRevision: "",
+          promptHash: promptHash(event.prompt),
+          status: "unavailable",
+          reason: state.phase,
+          latencyMs: Date.now() - startedAt,
+          candidates: [],
+          selected: [],
+        });
         await diag.log({
           level: "info",
           component: "router",
@@ -681,11 +793,30 @@ export default function extension(pi: ExtensionAPI): void {
         catalogHash: snapshot.revision,
         catalogPath: join(home, "catalogs", snapshot.revision, "catalog.json"),
         topK: 3,
-        sessionId:
-          ctx.sessionManager &&
-          typeof ctx.sessionManager.getSessionId === "function"
-            ? ctx.sessionManager.getSessionId()
-            : "ephemeral",
+        sessionId,
+        routeId,
+        projectId: project.id,
+        projectName: project.name,
+      });
+      const error = client.lastRouteError();
+      await telemetry.append({
+        schemaVersion: 1,
+        type: "route",
+        eventId: randomUUID(),
+        routeId,
+        ts: new Date().toISOString(),
+        host: "omp",
+        projectId: project.id,
+        projectName: project.name,
+        sessionId,
+        turnId: routeId,
+        catalogRevision: snapshot.revision,
+        promptHash: pHash,
+        status: routeStatus(result.unavailable, result.names, error),
+        reason: error,
+        latencyMs: Date.now() - startedAt,
+        candidates: result.candidates,
+        selected: result.names,
       });
 
       if (result.unavailable) {
@@ -694,11 +825,10 @@ export default function extension(pi: ExtensionAPI): void {
           component: "router",
           event: "route.unavailable",
           promptHash: pHash,
-          error: client.lastRouteError() ?? "router unavailable",
+          error: error ?? "router unavailable",
         });
         return;
       }
-
       if (!result.names.length) {
         await diag.log({
           level: "info",
@@ -708,7 +838,17 @@ export default function extension(pi: ExtensionAPI): void {
         });
         return;
       }
-
+      pendingRoutes.set(sessionId, {
+        routeId,
+        projectId: project.id,
+        projectName: project.name,
+        sessionId,
+        turnId: routeId,
+        catalogRevision: snapshot.revision,
+        selected: result.names,
+        used: new Set(),
+        toolErrors: 0,
+      });
       await diag.log({
         level: "info",
         component: "router",
@@ -716,16 +856,32 @@ export default function extension(pi: ExtensionAPI): void {
         promptHash: pHash,
         names: result.names,
       });
-
-      if (ctx.hasUI) {
+      if (ctx.hasUI)
         ctx.ui.setStatus(
           "omp-skill-kit-route",
           `omp-skill-kit: skills ${result.names.join(", ")}`,
         );
-      }
-
       return { systemPrompt: appendHints(event.systemPrompt, result.names) };
     } catch (e) {
+      await telemetry.append({
+        schemaVersion: 1,
+        type: "route",
+        eventId: randomUUID(),
+        routeId,
+        ts: new Date().toISOString(),
+        host: "omp",
+        projectId: project.id,
+        projectName: project.name,
+        sessionId,
+        turnId: routeId,
+        catalogRevision: "",
+        promptHash: promptHash(event.prompt),
+        status: "failed",
+        reason: e instanceof Error ? e.message : String(e),
+        latencyMs: Date.now() - startedAt,
+        candidates: [],
+        selected: [],
+      });
       await diag.log({
         level: "error",
         component: "router",
@@ -733,6 +889,32 @@ export default function extension(pi: ExtensionAPI): void {
         error: e instanceof Error ? e.message : String(e),
       });
       return;
+    }
+  });
+
+  pi.on("tool_result", async (event: ToolResultEvent, ctx) => {
+    const route = pendingRoutes.get(currentSessionId(ctx));
+    if (!route) return;
+    if (event.isError) route.toolErrors += 1;
+    if (event.toolName !== "read") return;
+    const path = typeof event.input.path === "string" ? event.input.path : "";
+    for (const name of route.selected)
+      if (skillWasRead(path, name)) route.used.add(name);
+  });
+
+  pi.on("session_stop", async (event: SessionStopEvent) => {
+    try {
+      const route = pendingRoutes.get(event.session_id);
+      if (!route) return;
+      pendingRoutes.delete(event.session_id);
+      await settleRoute(
+        route,
+        event.messages,
+        new TelemetryStore(home),
+        client,
+      );
+    } catch (err) {
+      logFailOpen(err);
     }
   });
 

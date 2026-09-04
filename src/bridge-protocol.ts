@@ -1,4 +1,10 @@
-export const BRIDGE_OPS = ["ping", "warmup", "rank", "shutdown"] as const;
+export const BRIDGE_OPS = [
+  "ping",
+  "warmup",
+  "rank",
+  "feedback",
+  "shutdown",
+] as const;
 export type BridgeOp = (typeof BRIDGE_OPS)[number];
 export interface BridgeRequest<T = unknown> {
   id: string;
@@ -19,7 +25,17 @@ export interface RankPayload {
   catalogPath: string;
   topK: number;
   sessionId: string;
+  routeId?: string;
+  projectId?: string;
+  projectName?: string;
 }
 export interface RankResult {
   candidates: Array<{ name: string; score: number }>;
+  feedbackApplied?: boolean;
+}
+export interface FeedbackPayload {
+  routeId: string;
+  projectId: string;
+  skillNames: string[];
+  verdict: "helpful" | "harmful" | "neutral";
 }

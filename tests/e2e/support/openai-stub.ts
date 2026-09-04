@@ -27,7 +27,10 @@ export interface OpenAIStubServer {
   reset: () => void;
 }
 
-export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
+export function startOpenAIStub(
+  port = 0,
+  preferredSkill = "e2e-valid-skill",
+): Promise<OpenAIStubServer> {
   return new Promise((resolvePromise, rejectPromise) => {
     const receipts: RequestReceipt[] = [];
     let turnCounter = 0;
@@ -165,7 +168,7 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
 
           const isStream = Boolean(body.stream);
           const shouldCallRead =
-            !hasToolResult && hintNames.includes("e2e-valid-skill");
+            !hasToolResult && hintNames.includes(preferredSkill);
 
           if (isStream) {
             res.writeHead(200, {
@@ -194,7 +197,7 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
                           function: {
                             name: "read",
                             arguments: JSON.stringify({
-                              path: "skill://e2e-valid-skill",
+                              path: `skill://${preferredSkill}`,
                             }),
                           },
                         },
@@ -218,6 +221,9 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
                 ? "Read tool result verified: " +
                   (toolResultText ? toolResultText.slice(0, 50) : "")
                 : "Standard response without skills";
+              const replyWithFeedback = hasToolResult
+                ? `${reply} <skill-used name="${preferredSkill}" verdict="helpful">`
+                : reply;
               const chunk1 = {
                 id: `chatcmpl-${Date.now()}`,
                 object: "chat.completion.chunk",
@@ -226,7 +232,7 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content: reply },
+                    delta: { role: "assistant", content: replyWithFeedback },
                     finish_reason: null,
                   },
                 ],
@@ -282,6 +288,9 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
                 ? "Read tool result verified: " +
                   (toolResultText ? toolResultText.slice(0, 50) : "")
                 : "Standard response without skills";
+              const replyWithFeedback = hasToolResult
+                ? `${reply} <skill-used name="${preferredSkill}" verdict="helpful">`
+                : reply;
               res.end(
                 JSON.stringify({
                   id: `chatcmpl-${Date.now()}`,
@@ -291,7 +300,10 @@ export function startOpenAIStub(port = 0): Promise<OpenAIStubServer> {
                   choices: [
                     {
                       index: 0,
-                      message: { role: "assistant", content: reply },
+                      message: {
+                        role: "assistant",
+                        content: replyWithFeedback,
+                      },
                       finish_reason: "stop",
                     },
                   ],

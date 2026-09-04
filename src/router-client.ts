@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BridgeResponse,
+  FeedbackPayload,
   RankPayload,
   RankResult,
 } from "./bridge-protocol.js";
@@ -26,9 +27,17 @@ export interface EndpointFile {
   port: number;
   token: string;
 }
+
+export interface RouteCandidate {
+  name: string;
+  score: number;
+}
+
 export interface RouteResult {
   names: string[];
+  candidates: RouteCandidate[];
   unavailable: boolean;
+  feedbackApplied: boolean;
 }
 
 export class RouterClient {
@@ -38,9 +47,11 @@ export class RouterClient {
     private readonly home: string,
     private readonly pluginRoot?: string,
   ) {}
+
   endpointPath(): string {
     return join(this.home, "endpoint.json");
   }
+
   async loadEndpoint(): Promise<void> {
     try {
       const raw = await readFile(this.endpointPath(), "utf8");
@@ -108,8 +119,6 @@ export class RouterClient {
       return false;
 
     runtime = await resolveBackgroundPython(runtime);
-
-    // Clean up dead endpoint.json if present
     try {
       await rm(this.endpointPath(), { force: true });
     } catch {}
@@ -140,18 +149,20 @@ export class RouterClient {
       await new Promise((r) => setTimeout(r, 150));
       if (await this.ping(1000)) return true;
     }
-
     return false;
   }
 
   async rank(payload: RankPayload): Promise<RouteResult> {
     let alive = await this.ping(500);
-    if (!alive) {
-      alive = await this.ensureBridge(5000);
-    }
+    if (!alive) alive = await this.ensureBridge(5000);
     if (!alive || !this.endpoint) {
       this.lastError = "bridge unavailable";
-      return { names: [], unavailable: true };
+      return {
+        names: [],
+        candidates: [],
+        unavailable: true,
+        feedbackApplied: false,
+      };
     }
 
     for (let attempt = 0; attempt <= ROUTE_RESTART_CAP; attempt++) {
@@ -162,11 +173,21 @@ export class RouterClient {
         );
         if (!response.ok) {
           this.lastError = response.error;
-          return { names: [], unavailable: true };
+          return {
+            names: [],
+            candidates: [],
+            unavailable: true,
+            feedbackApplied: false,
+          };
         }
         const result = (response.result ?? { candidates: [] }) as RankResult;
-        const names = this.sanitize(result.candidates ?? []);
-        return { names, unavailable: false };
+        const candidates = this.sanitizeCandidates(result.candidates ?? []);
+        return {
+          names: candidates.map((candidate) => candidate.name),
+          candidates,
+          unavailable: false,
+          feedbackApplied: result.feedbackApplied === true,
+        };
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error);
         if (attempt < ROUTE_RESTART_CAP) {
@@ -175,7 +196,33 @@ export class RouterClient {
         }
       }
     }
-    return { names: [], unavailable: true };
+    return {
+      names: [],
+      candidates: [],
+      unavailable: true,
+      feedbackApplied: false,
+    };
+  }
+
+  async recordFeedback(
+    payload: FeedbackPayload,
+    timeoutMs = 750,
+  ): Promise<boolean> {
+    if (!(await this.ping(500)) || !this.endpoint) return false;
+    try {
+      const response = await this.call(
+        {
+          id: randomUUID(),
+          op: "feedback",
+          token: this.endpoint.token,
+          payload,
+        },
+        timeoutMs,
+      );
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   lastRouteError(): string | undefined {
@@ -185,9 +232,9 @@ export class RouterClient {
   private async call(
     request: {
       id: string;
-      op: "ping" | "rank" | "shutdown";
+      op: "ping" | "rank" | "feedback" | "shutdown";
       token: string;
-      payload?: RankPayload;
+      payload?: RankPayload | FeedbackPayload;
     },
     timeoutMs: number,
   ): Promise<BridgeResponse> {
@@ -199,24 +246,24 @@ export class RouterClient {
     });
   }
 
-  private sanitize(
+  private sanitizeCandidates(
     candidates: Array<{ name: string; score: number }>,
-  ): string[] {
-    const names: string[] = [];
+  ): RouteCandidate[] {
+    const result: RouteCandidate[] = [];
     const seen = new Set<string>();
     let bytes = 0;
     for (const candidate of candidates) {
-      if (names.length >= MAX_CANDIDATES) break;
+      if (result.length >= MAX_CANDIDATES) break;
       const name = String(candidate.name ?? "");
       const score = Number(candidate.score);
       if (!name || !Number.isFinite(score) || seen.has(name)) continue;
       const cost = Buffer.byteLength(name, "utf8") + 1;
       if (bytes + cost > MAX_CANDIDATE_HINT_BYTES) break;
       seen.add(name);
-      names.push(name);
+      result.push({ name, score });
       bytes += cost;
     }
-    return names;
+    return result;
   }
 }
 

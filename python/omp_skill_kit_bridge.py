@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import time
@@ -19,7 +20,9 @@ PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
 IDLE_SHUTDOWN_S = 30 * 60
-OPS = {"ping", "warmup", "rank", "shutdown"}
+OPS = {"ping", "warmup", "rank", "feedback", "shutdown"}
+SAFE_SKILL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+VERDICTS = {"helpful", "harmful", "neutral"}
 
 
 def _home_arg() -> str:
@@ -35,7 +38,9 @@ def _catalog_root(catalog_path: str, catalog_hash: str) -> Path:
         if data.get("revision") != catalog_hash:
             raise ValueError("catalog revision mismatch")
         root = root / "skills"
-    if not root.is_dir() or not any((child / "SKILL.md").is_file() for child in root.iterdir() if child.is_dir()):
+    if not root.is_dir() or not any(
+        (child / "SKILL.md").is_file() for child in root.iterdir() if child.is_dir()
+    ):
         raise ValueError("catalog skills directory missing")
     return root
 
@@ -132,20 +137,23 @@ class BridgeServer:
         if op == "shutdown":
             self._stop_event.set()
             return {"id": request_id, "ok": True, "result": "bye"}
+        payload = request.get("payload")
         if op == "warmup":
-            payload = request.get("payload") or {}
+            payload = payload or {}
             try:
                 await self._warmup(str(payload.get("catalogPath", "")), str(payload.get("catalogHash", "")))
                 return {"id": request_id, "ok": True, "result": "warm"}
             except Exception:
                 return {"id": request_id, "ok": False, "error": "warmup failed"}
-        payload = request.get("payload")
         if not isinstance(payload, dict):
             return {"id": request_id, "ok": False, "error": "bad payload"}
         try:
+            if op == "feedback":
+                return {"id": request_id, "ok": True, "result": await self._record_feedback(payload)}
             return {"id": request_id, "ok": True, "result": await self._rank(payload)}
         except Exception:
-            return {"id": request_id, "ok": False, "error": "rank failed"}
+            LOG.warning("bridge operation failed", exc_info=True)
+            return {"id": request_id, "ok": False, "error": f"{op} failed"}
 
     async def _send(self, writer: asyncio.StreamWriter, response: dict[str, Any]) -> None:
         wire = json.dumps(response, separators=(",", ":"))
@@ -174,12 +182,59 @@ class BridgeServer:
         router = await self._get_router(catalog_path, catalog_hash)
         await asyncio.to_thread(router.warmup)
 
+    def _feedback_path(self) -> Path:
+        return self.home / "telemetry" / "feedback.json"
+
+    def _load_feedback(self) -> dict[str, dict[str, dict[str, int]]]:
+        try:
+            data = json.loads(self._feedback_path().read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_feedback(self, data: dict[str, dict[str, dict[str, int]]]) -> None:
+        path = self._feedback_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+
+    async def _record_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = payload.get("projectId")
+        verdict = payload.get("verdict")
+        route_id = payload.get("routeId")
+        skill_names = payload.get("skillNames")
+        if not isinstance(project_id, str) or len(project_id) != 64:
+            raise ValueError("invalid project id")
+        if verdict not in VERDICTS or not isinstance(route_id, str) or not route_id:
+            raise ValueError("invalid feedback")
+        if not isinstance(skill_names, list) or not skill_names or any(
+            not isinstance(name, str) or SAFE_SKILL.fullmatch(name) is None for name in skill_names
+        ):
+            raise ValueError("invalid skill names")
+        data = self._load_feedback()
+        project = data.setdefault(project_id, {})
+        for name in set(skill_names):
+            stats = project.setdefault(name, {"helpful": 0, "harmful": 0, "neutral": 0})
+            stats[verdict] = int(stats.get(verdict, 0)) + 1
+        self._save_feedback(data)
+        return {"recorded": True, "routeId": route_id, "skills": len(set(skill_names))}
+
+    def _feedback_bias(self, project_id: str, skill_name: str) -> float:
+        stats = self._load_feedback().get(project_id, {}).get(skill_name, {})
+        helpful = int(stats.get("helpful", 0))
+        harmful = int(stats.get("harmful", 0))
+        return max(-0.1, min(0.1, helpful * 0.02 - harmful * 0.03))
+
     async def _rank(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = payload.get("prompt")
         prompt_hash = payload.get("promptHash")
         catalog_hash = payload.get("catalogHash")
         catalog_path = payload.get("catalogPath")
         session_id = payload.get("sessionId")
+        project_id = payload.get("projectId")
+        project_name = payload.get("projectName")
+        route_id = payload.get("routeId")
         top_k = max(1, min(3, int(payload.get("topK", 3))))
         if not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
             raise ValueError("invalid prompt")
@@ -187,6 +242,8 @@ class BridgeServer:
             raise ValueError("prompt hash mismatch")
         if not isinstance(catalog_hash, str) or not isinstance(catalog_path, str):
             raise ValueError("catalog identity missing")
+        if not isinstance(project_id, str) or len(project_id) != 64 or not isinstance(route_id, str):
+            raise ValueError("route identity missing")
         router = await self._get_router(catalog_path, catalog_hash)
         ranked = await asyncio.to_thread(router.rank, prompt, top_k=top_k, dynamic=True)
         try:
@@ -195,12 +252,23 @@ class BridgeServer:
         except Exception:
             pass
         candidates = []
+        feedback_applied = False
         for item in ranked[:top_k]:
             name = getattr(item, "name", "")
             score = getattr(item, "score", None)
             if isinstance(name, str) and name and isinstance(score, (int, float)) and score == score:
-                candidates.append({"name": name, "score": float(score)})
-        return {"candidates": candidates}
+                bias = self._feedback_bias(project_id, name)
+                feedback_applied = feedback_applied or bias != 0
+                candidates.append({"name": name, "score": float(score) + bias})
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "candidates": candidates,
+            "routeId": route_id,
+            "projectId": project_id,
+            "projectName": project_name if isinstance(project_name, str) else "unknown-project",
+            "catalogRevision": catalog_hash,
+            "feedbackApplied": feedback_applied,
+        }
 
 
 class Bridge:
@@ -229,6 +297,9 @@ class Bridge:
                     "catalogHash": self.args.catalog_hash,
                     "catalogPath": self.args.catalog_path,
                     "sessionId": "installer-fixture",
+                    "routeId": "installer-fixture",
+                    "projectId": "0" * 64,
+                    "projectName": "installer-fixture",
                     "topK": 1,
                 })
             print("warmup ok", flush=True)
