@@ -38,6 +38,7 @@ export interface RouteResult {
   candidates: RouteCandidate[];
   unavailable: boolean;
   feedbackApplied: boolean;
+  feedbackAdjusted: number;
 }
 
 export class RouterClient {
@@ -162,6 +163,7 @@ export class RouterClient {
         candidates: [],
         unavailable: true,
         feedbackApplied: false,
+        feedbackAdjusted: 0,
       };
     }
 
@@ -178,6 +180,7 @@ export class RouterClient {
             candidates: [],
             unavailable: true,
             feedbackApplied: false,
+        feedbackAdjusted: 0,
           };
         }
         const result = (response.result ?? { candidates: [] }) as RankResult;
@@ -187,6 +190,7 @@ export class RouterClient {
           candidates,
           unavailable: false,
           feedbackApplied: result.feedbackApplied === true,
+          feedbackAdjusted: result.feedbackAdjusted ?? 0,
         };
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error);
@@ -201,6 +205,7 @@ export class RouterClient {
       candidates: [],
       unavailable: true,
       feedbackApplied: false,
+        feedbackAdjusted: 0,
     };
   }
 

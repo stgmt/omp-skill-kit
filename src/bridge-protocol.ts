@@ -32,6 +32,7 @@ export interface RankPayload {
 export interface RankResult {
   candidates: Array<{ name: string; score: number }>;
   feedbackApplied?: boolean;
+  feedbackAdjusted?: number;
 }
 export interface FeedbackPayload {
   routeId: string;

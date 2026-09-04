@@ -252,13 +252,16 @@ class BridgeServer:
         except Exception:
             pass
         candidates = []
-        feedback_applied = False
+        project_feedback = self._load_feedback().get(project_id, {})
+        feedback_applied = bool(project_feedback)
+        feedback_adjusted = 0
         for item in ranked[:top_k]:
             name = getattr(item, "name", "")
             score = getattr(item, "score", None)
             if isinstance(name, str) and name and isinstance(score, (int, float)) and score == score:
                 bias = self._feedback_bias(project_id, name)
-                feedback_applied = feedback_applied or bias != 0
+                if bias != 0:
+                    feedback_adjusted += 1
                 candidates.append({"name": name, "score": float(score) + bias})
         candidates.sort(key=lambda item: item["score"], reverse=True)
         return {
@@ -268,6 +271,7 @@ class BridgeServer:
             "projectName": project_name if isinstance(project_name, str) else "unknown-project",
             "catalogRevision": catalog_hash,
             "feedbackApplied": feedback_applied,
+            "feedbackAdjusted": feedback_adjusted,
         }
 
 
