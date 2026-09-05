@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -20,7 +20,9 @@ async function main() {
   await rm(stagingDir, { recursive: true, force: true });
   await mkdir(stagingDir, { recursive: true });
 
-  execSync("tar -xzf \"" + archivePath + "\" -C \"" + stagingDir + "\"");
+      const archiveArg = relative(root, archivePath);
+      const stagingArg = relative(root, stagingDir).replaceAll("\\", "/");
+      execSync("tar -xzf \"" + archiveArg + "\" -C \"" + stagingArg + "\"", { cwd: root });
   const extracted = join(stagingDir, "omp-skill-kit-" + version);
 
   // Flatten so candidate root contains package.json directly
