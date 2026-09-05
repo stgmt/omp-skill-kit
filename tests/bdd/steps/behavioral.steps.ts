@@ -1402,3 +1402,70 @@ When("session shutdown is handled by the extension", async () => {
 Then("the extension logs the rejection fail-open without throwing", () => {
   assert.equal(bddShutdownThrew, false);
 });
+
+let bddBackfillRoot = "";
+let bddBackfillResult:
+  | { scanned: number; recorded: number; skipped: number }
+  | undefined;
+
+Given(
+  "a profile sessions root with old transcripts for the project",
+  async () => {
+    const fs = await import("node:fs/promises");
+    bddProjectDir = join(tempHome, "bdd-backfill-project");
+    await fs.mkdir(bddProjectDir, { recursive: true });
+    bddBackfillRoot = join(tempHome, "backfill-profile", "agent", "sessions");
+    const slugDir = join(bddBackfillRoot, "backfill-slug");
+    await fs.mkdir(slugDir, { recursive: true });
+    for (const [name, id] of [
+      ["hist-1.jsonl", "bdd-hist-1"],
+      ["hist-2.jsonl", "bdd-hist-2"],
+    ] as const) {
+      const content = [
+        JSON.stringify({
+          type: "session",
+          id,
+          cwd: bddProjectDir,
+          timestamp: "2026-08-01T01:00:00.000Z",
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "old work" },
+        }),
+      ].join("\n");
+      await fs.writeFile(join(slugDir, name), content, "utf8");
+    }
+    const { ProposalRepository } = await import(
+      "../../../src/proposals/repository.js"
+    );
+    bddRepo = new ProposalRepository(tempHome);
+  },
+);
+
+When("the project backfill runs", async () => {
+  const { backfillProjectSessions } = await import(
+    "../../../src/proposals/backfill.js"
+  );
+  bddBackfillResult = await backfillProjectSessions(
+    bddRepo,
+    bddBackfillRoot,
+    bddProjectDir,
+  );
+});
+
+Then("old sessions become pending exactly once", async () => {
+  assert.equal(bddBackfillResult?.recorded, 2);
+  const { projectIdentity } = await import("../../../src/telemetry.js");
+  const projectId = projectIdentity(bddProjectDir).id;
+  const pending = await bddRepo.getPendingSessions(projectId);
+  assert.equal(pending.length, 2);
+  const { backfillProjectSessions } = await import(
+    "../../../src/proposals/backfill.js"
+  );
+  const repeat = await backfillProjectSessions(
+    bddRepo,
+    bddBackfillRoot,
+    bddProjectDir,
+  );
+  assert.equal(repeat.recorded, 0);
+});

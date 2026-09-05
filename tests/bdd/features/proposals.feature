@@ -27,3 +27,8 @@ Feature: SkillOpt proposal generation and management
     Given an invalid or corrupt session file on shutdown
     When session shutdown is handled by the extension
     Then the extension logs the rejection fail-open without throwing
+
+  Scenario: Pre-existing session history becomes pending once
+    Given a profile sessions root with old transcripts for the project
+    When the project backfill runs
+    Then old sessions become pending exactly once

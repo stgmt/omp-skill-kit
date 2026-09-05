@@ -127,7 +127,7 @@ describe("ProposalService", () => {
     expect(res.reason).toBe("proposals_disabled");
   });
 
-  it("does not schedule when fewer than 5 pending sessions exist", async () => {
+  it("does not schedule when no pending sessions exist", async () => {
     const service = new ProposalService({
       home: tmpDir,
       pluginRoot: resolve("."),
@@ -166,8 +166,8 @@ describe("ProposalService", () => {
     baseline.baselineAt = "2026-09-05T00:00:00.000Z";
     await atomicWriteJson(repo.baselineFile(projectId), baseline);
 
-    // Record only 4 sessions
-    for (let i = 0; i < 4; i++) {
+    // Record zero sessions: an empty queue must not spawn a worker.
+    for (let i = 0; i < 0; i++) {
       const s: CompletedSession = {
         sessionId: `s-${i}`,
         sessionHash: `h-${i}`,
@@ -188,6 +188,63 @@ describe("ProposalService", () => {
     });
     expect(res.scheduled).toBe(false);
     expect(res.reason).toBe("insufficient_sessions");
+  });
+
+  it("schedules when a single pending session exists", async () => {
+    const service = new ProposalService({
+      home: tmpDir,
+      pluginRoot: resolve("."),
+    });
+    const repo = service.repo;
+    const cwd = "/test/project";
+    const { projectIdentity } = await import("../../src/telemetry.js");
+    const projectId = projectIdentity(cwd).id;
+
+    await atomicWriteJson(join(tmpDir, "state.json"), {
+      schemaVersion: 1,
+      phase: "ready",
+      attempts: 0,
+      generation: 1,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const fakePython = join(tmpDir, "fake-python.exe");
+    await writeFile(fakePython, "", "utf8");
+    await mkdir(join(tmpDir, "runtime"), { recursive: true });
+    await atomicWriteJson(join(tmpDir, "runtime", "active.json"), {
+      venv: fakePython,
+    });
+
+    // Per-run batch stays 5, but a single waiting session already triggers.
+    await mkdir(join(tmpDir, "proposals"), { recursive: true });
+    await atomicWriteJson(join(tmpDir, "proposals", "config.json"), {
+      schemaVersion: 1,
+      enabled: true,
+      batchSize: 5,
+      minimumIntervalHours: 24,
+      model: "current",
+      autoAdopt: false,
+    });
+
+    await repo.ensureBaseline(projectId);
+    await repo.recordCompletedSession({
+      sessionId: "s-lone",
+      sessionHash: "h-lone",
+      sessionFile: "/path/lone.jsonl",
+      projectId,
+      projectRoot: cwd,
+      profileRoot: "profile-1",
+      startedAt: "2026-09-05T01:00:00.000Z",
+      completedAt: "2026-09-05T01:10:00.000Z",
+    });
+
+    const res = await service.schedule({
+      cwd,
+      model: "claude-3-5-sonnet",
+      profileRoot: "profile-1",
+    });
+    expect(res.scheduled).toBe(true);
+    expect(res.pid).toBeDefined();
   });
 
   it("does not schedule if 24-hour interval has not elapsed", async () => {

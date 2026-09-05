@@ -154,10 +154,10 @@ export class ProposalService {
       }
     }
 
-    // Check pending count >= batchSize
-    const batchSize = Math.max(1, config.batchSize ?? 1);
+    // Trigger as soon as at least one session waits; the worker analyzes
+    // up to batchSize newest sessions per run.
     const pending = await this.repo.getPendingSessions(project.id, profileRoot);
-    if (pending.length < batchSize) {
+    if (pending.length < 1) {
       return { scheduled: false, reason: "insufficient_sessions" };
     }
 

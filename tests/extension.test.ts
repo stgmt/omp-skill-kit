@@ -95,6 +95,7 @@ describe("native extension lifecycle and commands", () => {
       model: { id: "test-model" },
       sessionManager: {
         getSessionFile: () => sessionFile,
+        getSessionDir: () => join(tempHome, "sessions"),
         getCwd: () => customCwd || process.cwd(),
         getSessionId: () => "mock-sess-1",
       },

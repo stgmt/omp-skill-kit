@@ -67,19 +67,14 @@ describe("ProposalRepository", () => {
     expect(stored?.completedAt).toBe("2026-09-05T01:10:00.000Z");
   });
 
-  it("filters pending sessions strictly against baseline and outcomes", async () => {
+  it("includes pre-baseline history and excludes only decided sessions", async () => {
     const repo = new ProposalRepository(tmpDir);
     const projectId = "test-proj-3";
 
-    // Set baseline at 02:00:00
-    const baseline = await repo.ensureBaseline(projectId);
-    const baselineTime = new Date("2026-09-05T02:00:00.000Z");
-    baseline.baselineAt = baselineTime.toISOString();
-    await repo.ensureProjectDirs(projectId);
-    const { atomicWriteJson } = await import("../../src/shared/fsx.js");
-    await atomicWriteJson(repo.baselineFile(projectId), baseline);
+    // First-seen marker only; start time no longer filters the queue.
+    await repo.ensureBaseline(projectId);
 
-    // Session 1: started before baseline (01:30:00) -> must be excluded
+    // Session 1: started long before first-seen -> still eligible (backfilled history)
     await repo.recordCompletedSession({
       sessionId: "s-old",
       sessionHash: "hash-s-old",
@@ -91,7 +86,7 @@ describe("ProposalRepository", () => {
       completedAt: "2026-09-05T02:05:00.000Z",
     });
 
-    // Session 2: started after baseline (02:10:00), completed at 02:20:00 -> eligible
+    // Session 2: completed at 02:20:00 -> eligible
     await repo.recordCompletedSession({
       sessionId: "s-new-1",
       sessionHash: "hash-s-new-1",
@@ -103,7 +98,7 @@ describe("ProposalRepository", () => {
       completedAt: "2026-09-05T02:20:00.000Z",
     });
 
-    // Session 3: started after baseline (02:30:00), completed at 02:40:00 -> eligible (newer)
+    // Session 3: completed at 02:40:00 -> eligible (newer)
     await repo.recordCompletedSession({
       sessionId: "s-new-2",
       sessionHash: "hash-s-new-2",
@@ -115,7 +110,7 @@ describe("ProposalRepository", () => {
       completedAt: "2026-09-05T02:40:00.000Z",
     });
 
-    // Session 4: started after baseline (02:50:00), but has outcome recorded -> excluded
+    // Session 4: has outcome recorded -> permanently excluded
     await repo.recordCompletedSession({
       sessionId: "s-with-outcome",
       sessionHash: "hash-s-with-outcome",
@@ -136,10 +131,11 @@ describe("ProposalRepository", () => {
     await repo.recordOutcome(projectId, outcome);
 
     const pending = await repo.getPendingSessions(projectId);
-    expect(pending.length).toBe(2);
-    // Newest first by completedAt: s-new-2 (02:40) then s-new-1 (02:20)
+    expect(pending.length).toBe(3);
+    // Newest first by completedAt: s-new-2 (02:40), s-new-1 (02:20), s-old (02:05)
     expect(pending[0].sessionId).toBe("s-new-2");
     expect(pending[1].sessionId).toBe("s-new-1");
+    expect(pending[2].sessionId).toBe("s-old");
   });
 
   it("handles runs, schedule, and resolutions", async () => {

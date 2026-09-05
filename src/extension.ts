@@ -19,6 +19,10 @@ import {
   inspectInstallLock,
 } from "./install-lock.js";
 import { adoptProposal, discardProposal } from "./proposals/adoption.js";
+import {
+  maybeBackfillProjectSessions,
+  resolveProfileSessionsRoot,
+} from "./proposals/backfill.js";
 import type { CompletedSession, Proposal } from "./proposals/domain.js";
 import { ProposalRepository } from "./proposals/repository.js";
 import { ProposalScanner } from "./proposals/scanner.js";
@@ -971,6 +975,12 @@ export default function extension(pi: ExtensionAPI): void {
       const repo = new ProposalRepository(home);
       const projectId = projectIdentity(ctx.cwd).id;
       await repo.ensureBaseline(projectId);
+      await maybeBackfillProjectSessions(
+        repo,
+        projectId,
+        resolveProfileSessionsRoot(ctx.sessionManager?.getSessionDir?.()),
+        ctx.cwd,
+      );
       await updateProposalsStatusline(ctx, home, diag);
       startProposalsTimer(ctx, home, diag);
 
@@ -997,6 +1007,12 @@ export default function extension(pi: ExtensionAPI): void {
       const repo = new ProposalRepository(home);
       const projectId = projectIdentity(ctx.cwd).id;
       await repo.ensureBaseline(projectId);
+      await maybeBackfillProjectSessions(
+        repo,
+        projectId,
+        resolveProfileSessionsRoot(ctx.sessionManager?.getSessionDir?.()),
+        ctx.cwd,
+      );
       await updateProposalsStatusline(ctx, home, diag);
       startProposalsTimer(ctx, home, diag);
 

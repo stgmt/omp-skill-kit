@@ -98,7 +98,7 @@ export interface ProposalConfig {
 export const DEFAULT_PROPOSAL_CONFIG: ProposalConfig = {
   schemaVersion: 1,
   enabled: true,
-  batchSize: 1,
+  batchSize: 5,
   minimumIntervalHours: 24,
   model: "current",
   autoAdopt: false,

@@ -18,6 +18,10 @@ import {
   type SessionOutcomeRecord,
 } from "./domain.js";
 
+export interface BackfillState {
+  backfilledAt: string; // ISO string
+}
+
 export class ProposalRepository {
   readonly home: string;
   readonly proposalsDir: string;
@@ -63,6 +67,10 @@ export class ProposalRepository {
     return join(this.projectDir(projectId), "notifications.json");
   }
 
+  backfillFile(projectId: string): string {
+    return join(this.projectDir(projectId), "backfill.json");
+  }
+
   userConfigFile(): string {
     return join(this.proposalsDir, "config.json");
   }
@@ -100,6 +108,25 @@ export class ProposalRepository {
       return existing;
     }
     return undefined;
+  }
+
+  async getBackfillState(
+    projectId: string,
+  ): Promise<BackfillState | undefined> {
+    const existing = await readJson<BackfillState>(
+      this.backfillFile(projectId),
+    );
+    if (existing?.backfilledAt) {
+      return existing;
+    }
+    return undefined;
+  }
+
+  async recordBackfill(projectId: string): Promise<void> {
+    await this.ensureProjectDirs(projectId);
+    await atomicWriteJson(this.backfillFile(projectId), {
+      backfilledAt: new Date().toISOString(),
+    } satisfies BackfillState);
   }
 
   /**
@@ -151,27 +178,23 @@ export class ProposalRepository {
 
   /**
    * Retrieve pending sessions:
-   * - startedAt >= baselineAt
    * - profileRoot matches (if provided)
    * - no outcome recorded in outcomes/
+   * No start-time filter: backfilled history recorded before first-seen is
+   * eligible exactly like new sessions. Exclusion is permanent and
+   * outcome-based only (see recordOutcome).
    * Sorted by completedAt descending (newest first).
    */
   async getPendingSessions(
     projectId: string,
     profileRoot?: string,
   ): Promise<CompletedSession[]> {
-    const baseline = await this.getBaseline(projectId);
-    if (!baseline) {
-      return [];
-    }
     const all = await this.listCompletedSessions(projectId);
-    const baselineTime = Date.parse(baseline.baselineAt);
     const outcomesDir = this.outcomesDir(projectId);
 
     const pending: CompletedSession[] = [];
     for (const session of all) {
-      const startedTime = Date.parse(session.startedAt);
-      if (Number.isNaN(startedTime) || startedTime < baselineTime) {
+      if (Number.isNaN(Date.parse(session.startedAt))) {
         continue;
       }
       if (profileRoot && session.profileRoot !== profileRoot) {
