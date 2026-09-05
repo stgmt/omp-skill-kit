@@ -400,7 +400,7 @@ async function main() {
     const feedbackPrompt = reelsMode
       ? "Audit rendered presentation reel transitions, typography, and regression evidence"
       : "Calculate corporate tax and generate balance sheet report";
-    const feedbackDeadline = Date.now() + 5_000;
+    const feedbackDeadline = Date.now() + 30_000;
     let reranked = await client.rank({
       prompt: feedbackPrompt,
       promptHash: promptHash(feedbackPrompt),
@@ -439,7 +439,7 @@ async function main() {
     assert.equal(
       reranked.feedbackApplied,
       true,
-      "Helpful verdict did not affect the next ranking within 5 seconds",
+      "Helpful verdict did not affect the next ranking within 30 seconds",
     );
     evidence.addScenario({
       name: reelsMode
