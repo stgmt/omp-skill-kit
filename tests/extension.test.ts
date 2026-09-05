@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -83,14 +83,21 @@ describe("native extension lifecycle and commands", () => {
     return { api, handlers, commands };
   }
 
-  function createMockContext() {
+  function createMockContext(customCwd?: string) {
     const statusMap = new Map<string, string | undefined>();
     const notifications: { message: string; type?: string }[] = [];
     const timers: (() => Promise<void> | void)[] = [];
+    let sessionFile = "";
 
     const ctx = {
       hasUI: true,
-      cwd: process.cwd(),
+      cwd: customCwd || process.cwd(),
+      model: { id: "test-model" },
+      sessionManager: {
+        getSessionFile: () => sessionFile,
+        getCwd: () => customCwd || process.cwd(),
+        getSessionId: () => "mock-sess-1",
+      },
       ui: {
         setStatus: (key: string, text: string | undefined) => {
           statusMap.set(key, text);
@@ -98,12 +105,15 @@ describe("native extension lifecycle and commands", () => {
         notify: (message: string, type?: "info" | "warning" | "error") => {
           notifications.push({ message, type });
         },
+        select: vi.fn(),
+        confirm: vi.fn().mockResolvedValue(true),
+        editor: vi.fn().mockResolvedValue(""),
       },
       setInterval: (callback: () => Promise<void> | void) => {
         timers.push(callback);
         return {} as unknown as Parameters<ExtensionContext["clearTimer"]>[0];
       },
-      clearTimer: () => {},
+      clearTimer: vi.fn(),
     } as unknown as ExtensionContext;
 
     return {
@@ -111,6 +121,9 @@ describe("native extension lifecycle and commands", () => {
       statusMap,
       notifications,
       timers,
+      setSessionFile(path: string) {
+        sessionFile = path;
+      },
       async triggerTimer() {
         for (const t of timers) {
           await t();
@@ -119,12 +132,14 @@ describe("native extension lifecycle and commands", () => {
     };
   }
 
-  it("registers lifecycle events and exactly six commands", () => {
+  it("registers lifecycle events and exactly seven commands", () => {
     const { api, handlers, commands } = createMockApi();
     extension(api);
 
     expect(Array.from(handlers.keys())).toEqual([
       "session_start",
+      "session_switch",
+      "session_shutdown",
       "before_agent_start",
       "tool_result",
       "session_stop",
@@ -136,6 +151,7 @@ describe("native extension lifecycle and commands", () => {
       "omp-skill-kit:doctor",
       "omp-skill-kit:purge",
       "omp-skill-kit:dashboard",
+      "omp-skill-kit:proposals",
       "omp-skill-kit:help",
     ]);
   });
@@ -394,7 +410,7 @@ describe("native extension lifecycle and commands", () => {
     }
   });
 
-  it("outputs complete help with all 6 commands and 4 log paths", async () => {
+  it("outputs complete help with all 7 commands and 5 log paths", async () => {
     const { api, commands } = createMockApi();
     extension(api);
 
@@ -411,12 +427,138 @@ describe("native extension lifecycle and commands", () => {
     expect(text).toContain("/omp-skill-kit:setup");
     expect(text).toContain("/omp-skill-kit:doctor");
     expect(text).toContain("/omp-skill-kit:dashboard");
+    expect(text).toContain("/omp-skill-kit:proposals");
     expect(text).toContain("/omp-skill-kit:purge");
     expect(text).toContain("/omp-skill-kit:help");
     expect(text).toContain("extension.log");
     expect(text).toContain("installer.log");
     expect(text).toContain("bridge.log");
     expect(text).toContain("dashboard.log");
+    expect(text).toContain("proposal-worker.log");
     expect(text).toContain("Start with /omp-skill-kit:doctor");
+  });
+
+  it("handles session_shutdown to record valid session receipt", async () => {
+    const { api, handlers } = createMockApi();
+    extension(api);
+
+    const projectDir = join(tempHome, "test-proj");
+    await mkdir(projectDir, { recursive: true });
+    const sessionsDir = join(
+      tempHome,
+      "profile",
+      "agent",
+      "sessions",
+      "test-proj-slug",
+    );
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionFile = join(sessionsDir, "test.jsonl");
+
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        id: "sess-lifecycle-1",
+        cwd: projectDir,
+        timestamp: "2026-09-05T02:00:00.000Z",
+      })}\n`,
+      "utf8",
+    );
+
+    const { ctx, setSessionFile } = createMockContext(projectDir);
+    setSessionFile(sessionFile);
+
+    const shutdownHandler = handlers.get("session_shutdown")?.[0];
+    expect(shutdownHandler).toBeDefined();
+
+    await shutdownHandler?.({ type: "session_shutdown" }, ctx);
+
+    const { ProposalRepository } = await import(
+      "../src/proposals/repository.js"
+    );
+    const { projectIdentity } = await import("../src/telemetry.js");
+    const repo = new ProposalRepository(tempHome);
+    const projectId = projectIdentity(projectDir).id;
+    const session = await repo.getCompletedSession(
+      projectId,
+      "sess-lifecycle-1",
+    );
+
+    expect(session).toBeDefined();
+    expect(session?.sessionId).toBe("sess-lifecycle-1");
+  });
+
+  it("updates proposals statusline and issues single notification per proposal", async () => {
+    const { api, handlers } = createMockApi();
+    extension(api);
+
+    const projectDir = join(tempHome, "notif-proj");
+    await mkdir(projectDir, { recursive: true });
+    const stagingDir = join(
+      projectDir,
+      ".skillopt-sleep",
+      "staging",
+      "20260905-120000",
+    );
+    await mkdir(stagingDir, { recursive: true });
+
+    await writeFile(join(stagingDir, "report.md"), "# Report", "utf8");
+    const skillContent = "---\nname: notif-skill\n---\n# Notif";
+    await writeFile(
+      join(stagingDir, "proposed_SKILL.md"),
+      skillContent,
+      "utf8",
+    );
+    const { sha256Hex } = await import("../src/shared/fsx.js");
+    const sha = sha256Hex(skillContent);
+
+    const manifest = {
+      schema: "skillopt-sleep-staging",
+      schema_version: 2,
+      accepted: true,
+      has_managed_skill: true,
+      legacy: {
+        skill: {
+          proposed_file: "proposed_SKILL.md",
+          live_path: join(
+            projectDir,
+            ".omp",
+            "skills",
+            "notif-skill",
+            "SKILL.md",
+          ),
+          sha256: sha,
+        },
+      },
+    };
+    await writeFile(
+      join(stagingDir, "manifest.json"),
+      JSON.stringify(manifest),
+      "utf8",
+    );
+
+    const { ctx, statusMap, notifications, triggerTimer } =
+      createMockContext(projectDir);
+
+    const startHandler = handlers.get("session_start")?.[0];
+    await startHandler?.({ type: "session_start" }, ctx);
+
+    // Statusline should show proposals: 1
+    expect(statusMap.get("omp-skill-kit-proposals")).toBe("proposals: 1");
+
+    // First poll generates exactly 1 notification
+    expect(
+      notifications.filter((n) =>
+        n.message.includes("New skill proposal available"),
+      ).length,
+    ).toBe(1);
+
+    // Second poll (trigger timer) should NOT re-notify for the same proposal
+    await triggerTimer();
+    expect(
+      notifications.filter((n) =>
+        n.message.includes("New skill proposal available"),
+      ).length,
+    ).toBe(1);
   });
 });

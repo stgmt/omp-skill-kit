@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   verify:
@@ -83,6 +85,13 @@ jobs:
       - run: pnpm run release:verify
       - name: Generate Consolidated Release Gate Manifest
         run: node scripts/generate-release-manifest.mjs
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            omp-skill-kit-*.tar.gz
+            omp-skill-kit-*.sha256
+            reports/e2e/**/manifest.json
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

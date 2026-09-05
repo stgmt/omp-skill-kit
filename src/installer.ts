@@ -44,6 +44,42 @@ import { resolveBackgroundPython, run } from "./shared/spawn.js";
 const HOME_ENV = "OMP_SKILL_KIT_HOME";
 const RUNTIME_VERSION = "v1"; // bump when layout/state contract changes
 
+export async function ensureProposalsConfig(home: string): Promise<void> {
+  const proposalsDir = join(home, "proposals");
+  await mkdir(proposalsDir, { recursive: true });
+
+  const userConfigPath = join(proposalsDir, "config.json");
+  if (!(await pathExists(userConfigPath))) {
+    const userConfig = {
+      schemaVersion: 1,
+      enabled: true,
+      batchSize: 1,
+      minimumIntervalHours: 24,
+      model: "current",
+      autoAdopt: false,
+    };
+    await atomicWriteJson(userConfigPath, userConfig);
+  }
+
+  const skilloptConfigPath = join(proposalsDir, "skillopt-config.json");
+  if (!(await pathExists(skilloptConfigPath))) {
+    const skilloptConfig = {
+      transcript_source: "pi",
+      projects: "invoked",
+      backend: "pi",
+      gate_mode: "on",
+      gate_no_regression: true,
+      evidence_log: true,
+      redact_secrets: true,
+      multi_skill_fanout: true,
+      evolve_skill: true,
+      evolve_memory: false,
+      auto_adopt: false,
+    };
+    await atomicWriteJson(skilloptConfigPath, skilloptConfig);
+  }
+}
+
 export function resolveHome(): string {
   const override = process.env[HOME_ENV];
   return override && override.length > 0
@@ -397,6 +433,26 @@ export async function install(opts: InstallerOptions): Promise<void> {
       );
     }
     log(`mega-tron ${importRes.stdout.trim()} installed into venv`);
+
+    // Verify vendored skillopt_sleep imports cleanly with plugin PYTHONPATH
+    const skillOptPyPath = join(pluginRoot, "python");
+    const skillOptEnv = {
+      ...xdgEnv,
+      PYTHONPATH: skillOptPyPath,
+    };
+    const skillOptImportRes = await run(
+      [venvPy, "-c", "import skillopt_sleep; print(skillopt_sleep.__file__)"],
+      { timeoutMs: 60_000, env: skillOptEnv },
+    );
+    if (skillOptImportRes.code !== 0) {
+      throw new Error(
+        `skillopt_sleep import failed: ${(skillOptImportRes.stderr || skillOptImportRes.stdout).slice(0, 800)}`,
+      );
+    }
+    log(`skillopt_sleep verified from ${skillOptImportRes.stdout.trim()}`);
+
+    // Atomically create proposals configs if not present
+    await ensureProposalsConfig(home);
 
     // ---- 8/9. warming-model ----------------------------------------------------
     stepStartedAt = new Date().toISOString();

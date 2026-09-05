@@ -80,5 +80,10 @@
       "lockFile": "macos-arm64.txt",
       "lockSha256": "d48557151781f0a36ea0b90b6e7bbac3c39e60189cb3f3e2f8a2dc33b5bb5ab8"
     }
+  },
+  "skillOptSleep": {
+    "sourceCommit": "db46cd9ae7ce12f1dbd73c945185816aa738751d",
+    "treeSha256": "26f5b3e82169f47aea13ea1d2b2238727a74e55c39b84a4c0a2d2d08618c89a8",
+    "license": "MIT"
   }
 }

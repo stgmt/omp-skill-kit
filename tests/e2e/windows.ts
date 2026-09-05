@@ -121,11 +121,16 @@ async function main() {
   console.log("   Real Python bridge is UP and responding to ping!");
 
   // Start loopback OpenAI stub model server
+  const expectedSkill = reelsMode
+    ? (await pathExists(
+        join(reelsProject, ".omp", "skills", "video-production-patterns"),
+      ))
+      ? "video-production-patterns"
+      : "regression-node"
+    : "e2e-valid-skill";
+
   console.log("3. Starting loopback OpenAI stub model server...");
-  const stub = await startOpenAIStub(
-    0,
-    reelsMode ? "video-production-patterns" : undefined,
-  );
+  const stub = await startOpenAIStub(0, reelsMode ? expectedSkill : undefined);
   console.log("   Stub running at:", stub.url);
 
   try {
@@ -297,13 +302,10 @@ async function main() {
       r1.hasHintsBlock,
       "System prompt missing <omp-skill-kit> hints block",
     );
+    // verify expectedSkill in hint names
     assert.ok(
-      r1.hintNames.includes(
-        reelsMode ? "video-production-patterns" : "e2e-valid-skill",
-      ),
-      reelsMode
-        ? "video-production-patterns not in production hint names"
-        : "e2e-valid-skill not in hint names",
+      r1.hintNames.includes(expectedSkill),
+      `${expectedSkill} not in hint names`,
     );
     assert.equal(
       r1.hasDescription,
@@ -384,9 +386,7 @@ async function main() {
       feedbackProject.id in feedback,
       `Feedback project identity mismatch: expected ${feedbackProject.id}, got ${Object.keys(feedback).join(",")}`,
     );
-    const feedbackSkillName = reelsMode
-      ? "video-production-patterns"
-      : "e2e-valid-skill";
+    const feedbackSkillName = reelsMode ? expectedSkill : "e2e-valid-skill";
     const feedbackEntry = (await loadEligibleCatalog(workspaceCwd)).find(
       (entry) => entry.name === feedbackSkillName,
     );

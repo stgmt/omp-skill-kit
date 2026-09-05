@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { createGunzip } from "node:zlib";
@@ -31,8 +31,44 @@ const archivePath = file(archiveName);
 const shaPath = file(`${archiveName}.sha256`);
 
 const manifest = JSON.parse(await readFile(file("runtime-manifest.json"), "utf8"));
+
+async function collectFiles(dir) {
+  const results = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await collectFiles(full)));
+    } else if (entry.isFile()) {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
+async function computeSkillOptTreeSha(dir) {
+  const all = await collectFiles(dir);
+  const pyFiles = all
+    .filter((f) => f.endsWith(".py"))
+    .map((f) => relative(dir, f).split("\\").join("/"))
+    .sort();
+  const hash = createHash("sha256");
+  for (const rel of pyFiles) {
+    hash.update(rel);
+    hash.update(await readFile(join(dir, rel)));
+  }
+  return hash.digest("hex");
+}
+
 if (manifest.megaTron.commit !== "0ed290a1df1739af5cf4291d0ad8155afc7af16b") {
   throw new Error("mega-tron pin drift");
+}
+if (manifest.skillOptSleep?.sourceCommit !== "db46cd9ae7ce12f1dbd73c945185816aa738751d") {
+  throw new Error("skillopt-sleep pin drift");
+}
+const localSkillOptSha = await computeSkillOptTreeSha(file("python", "skillopt_sleep"));
+if (localSkillOptSha !== manifest.skillOptSleep.treeSha256) {
+  throw new Error(`skillopt-sleep treeSha256 drift: ${localSkillOptSha} !== ${manifest.skillOptSleep.treeSha256}`);
 }
 
 for (const [target, spec] of Object.entries(manifest.targets)) {
@@ -45,6 +81,7 @@ for (const [target, spec] of Object.entries(manifest.targets)) {
 for (const required of [
   "dist/extension.js",
   "dist/installer.js",
+  "dist/proposal-worker.js",
   "python/omp_skill_kit_bridge.py",
   "skills/mega-tron-dashboard/SKILL.md",
 ]) {
@@ -103,9 +140,13 @@ const requiredArchiveEntries = [
   `${prefix}LICENSE`,
   `${prefix}dist/extension.js`,
   `${prefix}dist/installer.js`,
+  `${prefix}dist/proposal-worker.js`,
   `${prefix}python/omp_skill_kit_bridge.py`,
   `${prefix}skills/mega-tron-dashboard/SKILL.md`,
   `${prefix}runtime-manifest.json`,
+  `${prefix}THIRD_PARTY_NOTICES`,
+  `${prefix}python/skillopt_sleep/__init__.py`,
+  `${prefix}python/skillopt_sleep/__main__.py`,
 ];
 
 for (const req of requiredArchiveEntries) {
@@ -135,6 +176,16 @@ for (const f of extractedFiles) {
 const extContent = await readFile(join(tempExtract, prefix, "dist", "extension.js"), "utf8");
 if (extContent.includes("pi_natives")) {
   throw new Error("Archived dist/extension.js inlined pi_natives host addon!");
+}
+
+// Verify unpacked skillopt_sleep treeSha256
+const unpackedSkillOptSha = await computeSkillOptTreeSha(join(tempExtract, prefix, "python", "skillopt_sleep"));
+if (unpackedSkillOptSha !== manifest.skillOptSleep.treeSha256) {
+  throw new Error(`Archived skillopt-sleep treeSha256 mismatch: ${unpackedSkillOptSha} !== ${manifest.skillOptSleep.treeSha256}`);
+}
+const noticesText = await readFile(join(tempExtract, prefix, "THIRD_PARTY_NOTICES"), "utf8");
+if (!noticesText.includes("SkillOpt-Sleep")) {
+  throw new Error("Archived THIRD_PARTY_NOTICES missing SkillOpt-Sleep notice");
 }
 
 // Verify unpacked package.json

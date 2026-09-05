@@ -3,5 +3,34 @@ omp-skill-kit bundles integration code for the following separately licensed pro
 - mega-tron - MIT License - https://github.com/mega-edo/mega-tron - pinned commit 0ed290a1df1739af5cf4291d0ad8155afc7af16b
 - uv - Apache-2.0 OR MIT - https://github.com/astral-sh/uv - pinned version 0.12.9
 - Python - PSF-2.0 - https://www.python.org/ - managed version 3.11.15
+- SkillOpt-Sleep - MIT License - pinned commit db46cd9ae7ce12f1dbd73c945185816aa738751d
 
 The plugin downloads these artifacts at runtime and does not modify their source code.
+
+- SkillOpt-Sleep - MIT License - pinned commit db46cd9ae7ce12f1dbd73c945185816aa738751d
+
+---
+
+## SkillOpt-Sleep MIT License
+
+MIT License
+
+Copyright (c) 2026 Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

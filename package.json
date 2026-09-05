@@ -1,7 +1,7 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.1.8",
-  "description": "Native OMP plugin: background mega-tron skill routing with names-only prompt hints.",
+  "version": "0.2.0",
+  "description": "Native OMP plugin: background mega-tron skill routing and SkillOpt-Sleep proposals with names-only prompt hints.",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -40,7 +40,7 @@
     "audit-reports/omp-skill-kit-omp-contract.md"
   ],
   "scripts": {
-    "build": "bun build src/extension.ts --outfile dist/extension.js --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-coding-agent/* --minify && bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --minify",
+    "build": "bun build src/extension.ts --outfile dist/extension.js --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-coding-agent/* --minify && bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --minify && bun build src/proposal-worker.ts --outfile dist/proposal-worker.js --target bun --format esm --minify",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src tests scripts package.json tsconfig.json biome.json vitest.config.ts vitest.mutation.config.ts cucumber.cjs",
     "test": "vitest run",

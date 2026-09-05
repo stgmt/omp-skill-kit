@@ -8,7 +8,8 @@ export type DiagnosticComponent =
   | "extension"
   | "installer"
   | "router"
-  | "dashboard";
+  | "dashboard"
+  | "proposals";
 
 export type DiagnosticEvent =
   | "installer.ensure.started"
@@ -25,7 +26,13 @@ export type DiagnosticEvent =
   | "route.matched"
   | "route.empty"
   | "route.unavailable"
-  | "route.failed";
+  | "route.failed"
+  | "proposal.notified"
+  | "proposal.adopted"
+  | "proposal.adopt_failed"
+  | "proposal.discarded"
+  | "session.recorded"
+  | "session.rejected";
 
 export interface DiagnosticEntry {
   ts: string;
@@ -38,6 +45,12 @@ export interface DiagnosticEntry {
   names?: string[];
   promptHash?: string;
   error?: string;
+  proposalId?: string;
+  sessionId?: string;
+  reason?: string;
+  skillName?: string;
+  file?: string;
+  projectId?: string;
 }
 
 export interface ComponentLogPaths {
@@ -46,6 +59,7 @@ export interface ComponentLogPaths {
   installerLog: string;
   bridgeLog: string;
   dashboardLog: string;
+  proposalWorkerLog: string;
 }
 
 export function getComponentLogPaths(home: string): ComponentLogPaths {
@@ -56,6 +70,7 @@ export function getComponentLogPaths(home: string): ComponentLogPaths {
     installerLog: join(logsDir, "installer.log"),
     bridgeLog: join(logsDir, "bridge.log"),
     dashboardLog: join(logsDir, "dashboard.log"),
+    proposalWorkerLog: join(logsDir, "proposal-worker.log"),
   };
 }
 
@@ -109,6 +124,12 @@ export class DiagnosticLog {
       names: sanitizedNames,
       promptHash: entry.promptHash,
       error: sanitizedError,
+      proposalId: entry.proposalId,
+      sessionId: entry.sessionId,
+      reason: entry.reason,
+      skillName: entry.skillName,
+      file: entry.file,
+      projectId: entry.projectId,
     };
 
     this.queue = this.queue.then(async () => {

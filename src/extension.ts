@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,12 @@ import {
   type InstallLockState,
   inspectInstallLock,
 } from "./install-lock.js";
+import { adoptProposal, discardProposal } from "./proposals/adoption.js";
+import type { CompletedSession, Proposal } from "./proposals/domain.js";
+import { ProposalRepository } from "./proposals/repository.js";
+import { ProposalScanner } from "./proposals/scanner.js";
+import { ProposalService } from "./proposals/service.js";
+import { validateAndParseSessionFile } from "./proposals/session-source.js";
 import { promptHash, RouterClient } from "./router-client.js";
 import {
   formatInstallProgress,
@@ -76,6 +82,7 @@ export type EnsureInstallerResult =
 let launchPromise: Promise<EnsureInstallerResult> | undefined;
 let activeContext: ExtensionContext | undefined;
 let observerTimer: ManagedTimer | undefined;
+let proposalsTimer: ManagedTimer | undefined;
 let observingInstallation = false;
 let dashboardPending = false;
 let isPollRunning = false;
@@ -220,6 +227,75 @@ function appendHints(systemPrompt: string[], names: string[]): string[] {
   ];
 }
 
+export async function updateProposalsStatusline(
+  ctx: ExtensionContext | ExtensionCommandContext,
+  home: string,
+  diag?: DiagnosticLog,
+): Promise<Proposal[]> {
+  if (!ctx.cwd) return [];
+  const project = projectIdentity(ctx.cwd);
+  const repo = new ProposalRepository(home);
+  const scanner = new ProposalScanner(repo);
+
+  try {
+    const proposals = await scanner.scanProjectProposals(ctx.cwd, project.id);
+    const count = proposals.length;
+
+    if (ctx.hasUI) {
+      if (count > 0) {
+        ctx.ui.setStatus("omp-skill-kit-proposals", `proposals: ${count}`);
+      } else {
+        ctx.ui.setStatus("omp-skill-kit-proposals", undefined);
+      }
+    }
+
+    if (count > 0 && ctx.hasUI) {
+      const ledger = await repo.getNotificationLedger(project.id);
+      let updatedLedger = false;
+      for (const p of proposals) {
+        if (!ledger.notifiedProposalIds[p.id]) {
+          ledger.notifiedProposalIds[p.id] = new Date().toISOString();
+          updatedLedger = true;
+          ctx.ui.notify(
+            `New skill proposal available: ${p.skillName} (not automatically adopted; review with /${PLUGIN_NAME}:proposals)`,
+            "info",
+          );
+          if (diag) {
+            await diag.log({
+              level: "info",
+              component: "proposals",
+              event: "proposal.notified",
+              proposalId: p.id,
+              skillName: p.skillName,
+            });
+          }
+        }
+      }
+      if (updatedLedger) {
+        await repo.updateNotificationLedger(project.id, ledger);
+      }
+    }
+
+    return proposals;
+  } catch (err) {
+    logFailOpen(err);
+    return [];
+  }
+}
+
+export function startProposalsTimer(
+  ctx: ExtensionContext,
+  home: string,
+  diag: DiagnosticLog,
+): void {
+  if (proposalsTimer) return;
+  proposalsTimer = ctx.setInterval(async () => {
+    if (activeContext) {
+      await updateProposalsStatusline(activeContext, home, diag);
+    }
+  }, 10_000);
+}
+
 export function helpText(home: string): string {
   const paths = getComponentLogPaths(home);
   return [
@@ -230,6 +306,7 @@ export function helpText(home: string): string {
     `  /${PLUGIN_NAME}:setup      Install or repair the local routing runtime`,
     `  /${PLUGIN_NAME}:doctor     Check runtime, bridge, lock, and catalog health`,
     `  /${PLUGIN_NAME}:dashboard  Open local routing dashboard (auto-queued during setup)`,
+    `  /${PLUGIN_NAME}:proposals  Review and adopt or discard SkillOpt proposals`,
     `  /${PLUGIN_NAME}:purge      Remove runtime data and stop background processes (--confirm required)`,
     `  /${PLUGIN_NAME}:help       Show command overview, runtime paths, and troubleshooting`,
     "",
@@ -239,6 +316,7 @@ export function helpText(home: string): string {
     `  installer: ${paths.installerLog}`,
     `  bridge:    ${paths.bridgeLog}`,
     `  dashboard: ${paths.dashboardLog}`,
+    `  worker:    ${paths.proposalWorkerLog}`,
     "",
     `Start with /${PLUGIN_NAME}:doctor`,
   ].join("\n");
@@ -247,6 +325,7 @@ export function helpText(home: string): string {
 export async function statusText(
   home: string,
   client: RouterClient,
+  cwd?: string,
 ): Promise<string> {
   const store = new StateStore(home);
   const state = await store.load();
@@ -266,7 +345,25 @@ export async function statusText(
       ? `; progress=${formatInstallProgress(state, lock.kind === "active" ? lock.owner : undefined)}`
       : "";
 
-  return `${PLUGIN_NAME}: phase=${state.phase}; lock=${lockDesc}; runtime=${state.runtimeHash || "none"}; bridge=${bridge ? "up" : "down"}; idle=${BRIDGE_IDLE_SHUTDOWN_MS / 60000}m${progress}; logs=${paths.logsDir}; help=/${PLUGIN_NAME}:help`;
+  let proposalSummary = "";
+  if (cwd) {
+    try {
+      const repo = new ProposalRepository(home);
+      const projectId = projectIdentity(cwd).id;
+      const pendingSessions = await repo.getPendingSessions(projectId);
+      const scanner = new ProposalScanner(repo);
+      const proposals = await scanner.scanProjectProposals(cwd, projectId);
+      const schedule = await repo.getSchedule(projectId);
+      const lastOutcome = schedule?.lastStatus ?? "none";
+      const config = await repo.getUserConfig();
+      const batchSize = Math.max(1, config.batchSize ?? 1);
+      proposalSummary = `; proposals=${proposals.length}; sessions=${pendingSessions.length}/${batchSize}; lastRun=${lastOutcome}; workerLog=${paths.proposalWorkerLog}`;
+    } catch {
+      // ignore
+    }
+  }
+
+  return `${PLUGIN_NAME}: phase=${state.phase}; lock=${lockDesc}; runtime=${state.runtimeHash || "none"}; bridge=${bridge ? "up" : "down"}; idle=${BRIDGE_IDLE_SHUTDOWN_MS / 60000}m${progress}${proposalSummary}; logs=${paths.logsDir}; help=/${PLUGIN_NAME}:help`;
 }
 
 export async function doctorText(
@@ -295,7 +392,10 @@ export async function doctorText(
       ? `; progress=${formatInstallProgress(state, lock.kind === "active" ? lock.owner : undefined)}`
       : "";
 
-  return `${PLUGIN_NAME}: phase=${state.phase}; lock=${lockDesc}; bridge=${bridge ? "up" : "down"}; catalogEntries=${catalog?.size ?? 0}; lastError=${lastErr}${progress}; logs=${paths.logsDir}; help=/${PLUGIN_NAME}:help`;
+  const proposalsConfig = await pathExists(
+    join(home, "proposals", "config.json"),
+  );
+  return `${PLUGIN_NAME}: phase=${state.phase}; lock=${lockDesc}; bridge=${bridge ? "up" : "down"}; catalogEntries=${catalog?.size ?? 0}; skilloptConfig=${proposalsConfig ? "ok" : "missing"}; lastError=${lastErr}${progress}; logs=${paths.logsDir}; help=/${PLUGIN_NAME}:help`;
 }
 
 async function openDashboard(
@@ -499,6 +599,15 @@ export async function startOrObserveInstallation(
       dashboardPending = false;
       await openDashboard(ctx, home, diag);
     }
+    if (activeContext) {
+      const service = new ProposalService({ home, pluginRoot: pluginRoot() });
+      await service
+        .schedule({
+          cwd: activeContext.cwd,
+          model: activeContext.model?.id || "",
+        })
+        .catch(logFailOpen);
+    }
     return;
   }
 
@@ -538,7 +647,7 @@ async function commandStatus(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   ctx.ui.notify(
-    await statusText(home, new RouterClient(home, pluginRoot())),
+    await statusText(home, new RouterClient(home, pluginRoot()), ctx.cwd),
     "info",
   );
 }
@@ -587,6 +696,121 @@ async function commandDoctor(
   const client = new RouterClient(home, pluginRoot());
   const bridge = await client.ping(1500);
   ctx.ui.notify(await doctorText(home, client), bridge ? "info" : "warning");
+}
+
+async function commandProposals(
+  home: string,
+  ctx: ExtensionCommandContext,
+  diag: DiagnosticLog,
+): Promise<void> {
+  const repo = new ProposalRepository(home);
+  const scanner = new ProposalScanner(repo);
+  const projectId = projectIdentity(ctx.cwd).id;
+
+  const proposals = await scanner.scanProjectProposals(ctx.cwd, projectId);
+  if (proposals.length === 0) {
+    ctx.ui.notify("No proposals available", "info");
+    return;
+  }
+
+  const options = proposals.map(
+    (p) => `${p.skillName} (${p.kind}) [id:${p.id.slice(0, 8)}]`,
+  );
+  const chosen = await ctx.ui.select("Select a proposal to review:", options);
+  if (!chosen) return;
+
+  const selected = proposals.find((p) => chosen.includes(p.id.slice(0, 8)));
+  if (!selected) return;
+
+  const reportContent = await readFile(selected.reportPath, "utf8").catch(
+    () => "No report available",
+  );
+  const skillContent = await readFile(selected.proposedSkillPath, "utf8").catch(
+    () => "No skill content available",
+  );
+
+  const reviewText = `# Proposal: ${selected.skillName} (${selected.kind})\nTarget: ${selected.targetSkillPath}\n\n## Report\n\n${reportContent}\n\n## Proposed SKILL.md\n\n${skillContent}`;
+
+  await ctx.ui.editor("Review proposal — edits are ignored", reviewText);
+
+  const action = await ctx.ui.select(
+    `Action for proposal ${selected.skillName}:`,
+    ["Adopt", "Discard", "Back"],
+  );
+
+  if (action === "Adopt") {
+    const confirmed = await ctx.ui.confirm(
+      `Adopt ${selected.skillName}`,
+      `Target path: ${selected.targetSkillPath}`,
+    );
+    if (!confirmed) return;
+
+    const service = new ProposalService({
+      home,
+      pluginRoot: pluginRoot(),
+      repo,
+    });
+    const python = await service.resolveActivePython();
+    if (!python) {
+      ctx.ui.notify(
+        "Managed python runtime not found; run /omp-skill-kit:setup first",
+        "error",
+      );
+      return;
+    }
+
+    const adoptRes = await adoptProposal({
+      home,
+      pluginRoot: pluginRoot(),
+      python,
+      projectRoot: ctx.cwd,
+      proposal: selected,
+    });
+
+    if (adoptRes.success) {
+      ctx.ui.notify(`Adopted ${selected.skillName} successfully`, "info");
+      await diag.log({
+        level: "info",
+        component: "proposals",
+        event: "proposal.adopted",
+        proposalId: selected.id,
+        skillName: selected.skillName,
+      });
+      await updateProposalsStatusline(ctx, home, diag);
+    } else {
+      ctx.ui.notify(`Adoption failed: ${adoptRes.error}`, "error");
+      await diag.log({
+        level: "error",
+        component: "proposals",
+        event: "proposal.adopt_failed",
+        proposalId: selected.id,
+        skillName: selected.skillName,
+        error: adoptRes.error,
+      });
+    }
+  } else if (action === "Discard") {
+    const confirmed = await ctx.ui.confirm(
+      `Discard proposal`,
+      `Are you sure you want to discard proposal for ${selected.skillName}?`,
+    );
+    if (!confirmed) return;
+
+    await discardProposal(
+      repo,
+      projectId,
+      selected.id,
+      "User discarded via command",
+    );
+    ctx.ui.notify(`Proposal ${selected.skillName} discarded`, "info");
+    await diag.log({
+      level: "info",
+      component: "proposals",
+      event: "proposal.discarded",
+      proposalId: selected.id,
+      skillName: selected.skillName,
+    });
+    await updateProposalsStatusline(ctx, home, diag);
+  }
 }
 
 async function commandPurge(
@@ -741,7 +965,112 @@ export default function extension(pi: ExtensionAPI): void {
   const catalogs = new CatalogStore(join(home, "catalogs"));
 
   pi.on("session_start", async (_event, ctx) => {
+    activeContext = ctx;
     await startOrObserveInstallation(ctx, home, diag).catch(logFailOpen);
+    try {
+      const repo = new ProposalRepository(home);
+      const projectId = projectIdentity(ctx.cwd).id;
+      await repo.ensureBaseline(projectId);
+      await updateProposalsStatusline(ctx, home, diag);
+      startProposalsTimer(ctx, home, diag);
+
+      const service = new ProposalService({
+        home,
+        pluginRoot: pluginRoot(),
+        repo,
+      });
+      const currentModel = ctx.model?.id || "";
+      await service
+        .schedule({
+          cwd: ctx.cwd,
+          model: currentModel,
+        })
+        .catch(logFailOpen);
+    } catch (err) {
+      logFailOpen(err);
+    }
+  });
+
+  pi.on("session_switch", async (_event, ctx) => {
+    activeContext = ctx;
+    try {
+      const repo = new ProposalRepository(home);
+      const projectId = projectIdentity(ctx.cwd).id;
+      await repo.ensureBaseline(projectId);
+      await updateProposalsStatusline(ctx, home, diag);
+      startProposalsTimer(ctx, home, diag);
+
+      const service = new ProposalService({
+        home,
+        pluginRoot: pluginRoot(),
+        repo,
+      });
+      const currentModel = ctx.model?.id || "";
+      await service
+        .schedule({
+          cwd: ctx.cwd,
+          model: currentModel,
+        })
+        .catch(logFailOpen);
+    } catch (err) {
+      logFailOpen(err);
+    }
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (proposalsTimer && typeof ctx?.clearTimer === "function") {
+      ctx.clearTimer(proposalsTimer);
+      proposalsTimer = undefined;
+    }
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("omp-skill-kit-proposals", undefined);
+    }
+
+    try {
+      if (!ctx.sessionManager) return;
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      if (!sessionFile) return;
+
+      const parseResult = await validateAndParseSessionFile(
+        sessionFile,
+        ctx.cwd,
+      );
+      if (!parseResult.valid) {
+        await diag.log({
+          level: "info",
+          component: "proposals",
+          event: "session.rejected",
+          reason: parseResult.reason,
+          file: parseResult.sessionFile,
+        });
+        return;
+      }
+
+      const repo = new ProposalRepository(home);
+      const completedSession: CompletedSession = {
+        sessionId: parseResult.sessionId,
+        sessionHash: parseResult.sessionHash,
+        sessionFile: parseResult.sessionFile,
+        projectId: parseResult.projectId,
+        projectRoot: parseResult.projectRoot,
+        profileRoot: parseResult.profileRoot,
+        startedAt: parseResult.startedAt,
+        completedAt: new Date().toISOString(),
+      };
+
+      const recorded = await repo.recordCompletedSession(completedSession);
+      if (recorded) {
+        await diag.log({
+          level: "info",
+          component: "proposals",
+          event: "session.recorded",
+          sessionId: parseResult.sessionId,
+          projectId: parseResult.projectId,
+        });
+      }
+    } catch (err) {
+      logFailOpen(err);
+    }
   });
 
   pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx) => {
@@ -937,6 +1266,10 @@ export default function extension(pi: ExtensionAPI): void {
   pi.registerCommand("omp-skill-kit:dashboard", {
     description: "Open local routing dashboard",
     handler: (_args, ctx) => commandDashboard(home, ctx, diag),
+  });
+  pi.registerCommand("omp-skill-kit:proposals", {
+    description: "Review and adopt or discard SkillOpt proposals",
+    handler: (_args, ctx) => commandProposals(home, ctx, diag),
   });
   pi.registerCommand("omp-skill-kit:help", {
     description: "Show command overview and diagnostic log paths",

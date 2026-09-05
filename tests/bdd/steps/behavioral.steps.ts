@@ -9,7 +9,7 @@ import {
   createServer as createNetServer,
   type Server as NetServer,
 } from "node:net";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   After,
@@ -237,9 +237,9 @@ Then("the installer launches with Bun execution flag", async () => {
 When("session start is triggered in the extension", async () => {
   resetLifecycleStateForTests();
   process.env.OMP_SKILL_KIT_HOME = tempHome;
-  const handlers = new Map<string, Function[]>();
+  const handlers = new Map<string, ((...args: any[]) => any)[]>();
   const fakeApi = {
-    on: (name: string, fn: Function) => {
+    on: (name: string, fn: (...args: any[]) => any) => {
       const list = handlers.get(name) ?? [];
       list.push(fn);
       handlers.set(name, list);
@@ -297,9 +297,9 @@ When("the state is an orphaned active phase without a live lock", async () => {
 
 When("session start is triggered again", async () => {
   lastStatusMap.clear();
-  const handlers = new Map<string, Function[]>();
+  const handlers = new Map<string, ((...args: any[]) => any)[]>();
   const fakeApi = {
-    on: (name: string, fn: Function) => {
+    on: (name: string, fn: (...args: any[]) => any) => {
       const list = handlers.get(name) ?? [];
       list.push(fn);
       handlers.set(name, list);
@@ -363,11 +363,12 @@ When("the extension is registered with an isolated host context", async () => {
   extension(fakeApi as any);
 });
 
-Then("exactly six canonical omp-skill-kit commands are registered", () => {
+Then("exactly seven canonical omp-skill-kit commands are registered", () => {
   const expected = [
     "omp-skill-kit:status",
     "omp-skill-kit:setup",
     "omp-skill-kit:doctor",
+    "omp-skill-kit:proposals",
     "omp-skill-kit:purge",
     "omp-skill-kit:dashboard",
     "omp-skill-kit:help",
@@ -380,6 +381,7 @@ Then("unprefixed command names are completely absent", () => {
     "status",
     "setup",
     "doctor",
+    "proposals",
     "purge",
     "dashboard",
     "help",
@@ -1005,4 +1007,398 @@ Then("offline reuse succeeds without external network requests", async () => {
   const store = new StateStore(tempHome);
   const state = await store.load();
   assert.equal(state.phase, "ready");
+});
+
+// ---- proposals.feature ---- //
+let bddProjectDir = "";
+let bddProjectId = "";
+let bddRepo: any;
+let bddStagingDir = "";
+let bddProposals: any[] = [];
+let bddStatusMap = new Map<string, string | undefined>();
+let bddNotifications: { message: string; type?: string }[] = [];
+let bddShutdownSessionFile = "";
+let bddShutdownThrew = false;
+
+Given("an isolated project with baseline initialized", async () => {
+  const fs = await import("node:fs/promises");
+  bddProjectDir = join(tempHome, "bdd-proposals-project");
+  await fs.mkdir(bddProjectDir, { recursive: true });
+  const { ProposalRepository } = await import(
+    "../../../src/proposals/repository.js"
+  );
+  const { projectIdentity } = await import("../../../src/telemetry.js");
+  bddProjectId = projectIdentity(bddProjectDir).id;
+  bddRepo = new ProposalRepository(tempHome);
+  const baseline = await bddRepo.ensureBaseline(bddProjectId);
+  baseline.baselineAt = "2026-09-05T00:00:00.000Z";
+  const { atomicWriteJson } = await import("../../../src/shared/fsx.js");
+  await atomicWriteJson(bddRepo.baselineFile(bddProjectId), baseline);
+});
+
+When("5 new valid OMP sessions are completed and recorded", async () => {
+  const { sha256Hex } = await import("../../../src/shared/fsx.js");
+  for (let i = 1; i <= 5; i++) {
+    await bddRepo.recordCompletedSession({
+      sessionId: `bdd-sess-${i}`,
+      sessionHash: sha256Hex(`bdd-sess-${i}`),
+      sessionFile: join(bddProjectDir, `sess-${i}.jsonl`),
+      projectId: bddProjectId,
+      projectRoot: bddProjectDir,
+      profileRoot: "profile-default",
+      startedAt: `2026-09-05T01:0${i}:00.000Z`,
+      completedAt: `2026-09-05T01:1${i}:00.000Z`,
+    });
+  }
+});
+
+Then("the proposal queue has 5 pending sessions", async () => {
+  const pending = await bddRepo.getPendingSessions(
+    bddProjectId,
+    "profile-default",
+  );
+  assert.equal(pending.length, 5);
+});
+
+Then("proposal scheduling succeeds for the project batch", async () => {
+  const fs = await import("node:fs/promises");
+  const fakePy = join(tempHome, "fake-python.exe");
+  await fs.writeFile(fakePy, "", "utf8");
+  await fs.mkdir(join(tempHome, "runtime"), { recursive: true });
+  const { atomicWriteJson } = await import("../../../src/shared/fsx.js");
+  await atomicWriteJson(join(tempHome, "runtime", "active.json"), {
+    venv: fakePy,
+  });
+  const store = new StateStore(tempHome);
+  await store.save({
+    schemaVersion: 1,
+    pluginVersion: "0.1.0",
+    runtimeHash: "bdd-hash",
+    phase: "ready",
+    attempt: 1,
+    updatedAt: new Date().toISOString(),
+  });
+
+  const { ProposalService } = await import("../../../src/proposals/service.js");
+  const service = new ProposalService({
+    home: tempHome,
+    pluginRoot: resolve("."),
+    repo: bddRepo,
+  });
+  const res = await service.schedule({
+    cwd: bddProjectDir,
+    model: "claude-3-5-sonnet",
+    profileRoot: "profile-default",
+  });
+  assert.equal(res.scheduled, true);
+  assert.ok(res.pid !== undefined);
+});
+
+Given("an isolated project with 5 completed sessions", async () => {
+  const fs = await import("node:fs/promises");
+  bddProjectDir = join(tempHome, "bdd-non-reanalyze-project");
+  await fs.mkdir(bddProjectDir, { recursive: true });
+  const { ProposalRepository } = await import(
+    "../../../src/proposals/repository.js"
+  );
+  const { projectIdentity } = await import("../../../src/telemetry.js");
+  bddProjectId = projectIdentity(bddProjectDir).id;
+  bddRepo = new ProposalRepository(tempHome);
+  const baseline = await bddRepo.ensureBaseline(bddProjectId);
+  baseline.baselineAt = "2026-09-05T00:00:00.000Z";
+  const { atomicWriteJson, sha256Hex } = await import(
+    "../../../src/shared/fsx.js"
+  );
+  await atomicWriteJson(bddRepo.baselineFile(bddProjectId), baseline);
+
+  for (let i = 1; i <= 5; i++) {
+    await bddRepo.recordCompletedSession({
+      sessionId: `non-re-sess-${i}`,
+      sessionHash: sha256Hex(`non-re-sess-${i}`),
+      sessionFile: join(bddProjectDir, `sess-${i}.jsonl`),
+      projectId: bddProjectId,
+      projectRoot: bddProjectDir,
+      profileRoot: "profile-default",
+      startedAt: `2026-09-05T01:0${i}:00.000Z`,
+      completedAt: `2026-09-05T01:1${i}:00.000Z`,
+    });
+  }
+});
+
+When(
+  "an outcome of {string} or {string} is recorded for the sessions",
+  async (outcome1: string, _outcome2: string) => {
+    const { sha256Hex } = await import("../../../src/shared/fsx.js");
+    for (let i = 1; i <= 5; i++) {
+      await bddRepo.recordOutcome(bddProjectId, {
+        sessionId: `non-re-sess-${i}`,
+        sessionHash: sha256Hex(`non-re-sess-${i}`),
+        runId: "run-bdd-outcomes",
+        outcome: outcome1,
+        recordedAt: new Date().toISOString(),
+      });
+    }
+  },
+);
+
+Then("the proposal queue has 0 pending sessions", async () => {
+  const pending = await bddRepo.getPendingSessions(
+    bddProjectId,
+    "profile-default",
+  );
+  assert.equal(pending.length, 0);
+});
+
+Then("no subsequent run will re-select those sessions", async () => {
+  const pending = await bddRepo.getPendingSessions(
+    bddProjectId,
+    "profile-default",
+  );
+  assert.equal(pending.length, 0);
+});
+
+Given("an isolated project staging directory", async () => {
+  const fs = await import("node:fs/promises");
+  bddProjectDir = join(tempHome, "bdd-staging-project");
+  await fs.mkdir(bddProjectDir, { recursive: true });
+  bddStagingDir = join(
+    bddProjectDir,
+    ".skillopt-sleep",
+    "staging",
+    "20260905-150000",
+  );
+  await fs.mkdir(bddStagingDir, { recursive: true });
+  const { ProposalRepository } = await import(
+    "../../../src/proposals/repository.js"
+  );
+  const { projectIdentity } = await import("../../../src/telemetry.js");
+  bddProjectId = projectIdentity(bddProjectDir).id;
+  bddRepo = new ProposalRepository(tempHome);
+});
+
+When(
+  "a valid accepted manifest with managed and fanout proposals is staged",
+  async () => {
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(join(bddStagingDir, "report.md"), "# Report", "utf8");
+
+    const skill1 = "---\nname: skillopt-sleep-learned\n---\n# Managed";
+    const skill2 = "---\nname: fanout-skill\n---\n# Fanout";
+    await fs.writeFile(
+      join(bddStagingDir, "proposed_SKILL.md"),
+      skill1,
+      "utf8",
+    );
+    await fs.writeFile(join(bddStagingDir, "prop_fanout.md"), skill2, "utf8");
+
+    const { sha256Hex, atomicWriteJson } = await import(
+      "../../../src/shared/fsx.js"
+    );
+    const sha1 = sha256Hex(skill1);
+    const sha2 = sha256Hex(skill2);
+
+    const manifest = {
+      schema: "skillopt-sleep-staging",
+      schema_version: 2,
+      accepted: true,
+      has_managed_skill: true,
+      legacy: {
+        skill: {
+          proposed_file: "proposed_SKILL.md",
+          live_path: join(
+            bddProjectDir,
+            ".omp",
+            "skills",
+            "skillopt-sleep-learned",
+            "SKILL.md",
+          ),
+          sha256: sha1,
+        },
+      },
+      skills: [
+        {
+          skill_name: "fanout-skill",
+          proposed_file: "prop_fanout.md",
+          live_skill_path: join(
+            bddProjectDir,
+            ".omp",
+            "skills",
+            "fanout-skill",
+            "SKILL.md",
+          ),
+          sha256: sha2,
+        },
+      ],
+    };
+    await atomicWriteJson(join(bddStagingDir, "manifest.json"), manifest);
+
+    bddStatusMap = new Map();
+    bddNotifications = [];
+    const fakeCtx = {
+      hasUI: true,
+      cwd: bddProjectDir,
+      ui: {
+        setStatus: (key: string, text?: string) => {
+          bddStatusMap.set(key, text);
+        },
+        notify: (message: string, type?: string) => {
+          bddNotifications.push({ message, type });
+        },
+      },
+    };
+
+    const { updateProposalsStatusline } = await import(
+      "../../../src/extension.js"
+    );
+    bddProposals = await updateProposalsStatusline(fakeCtx as any, tempHome);
+  },
+);
+
+Then("the proposals statusline displays {string}", (statusText: string) => {
+  assert.equal(bddStatusMap.get("omp-skill-kit-proposals"), statusText);
+});
+
+Then("exactly one notification is emitted for each new proposal", () => {
+  assert.equal(
+    bddNotifications.filter((n) =>
+      n.message.includes("New skill proposal available"),
+    ).length,
+    2,
+  );
+});
+
+Given("an isolated project with a staged proposal", async () => {
+  const fs = await import("node:fs/promises");
+  bddProjectDir = join(tempHome, "bdd-lifecycle-project");
+  await fs.mkdir(bddProjectDir, { recursive: true });
+  bddStagingDir = join(
+    bddProjectDir,
+    ".skillopt-sleep",
+    "staging",
+    "20260905-160000",
+  );
+  await fs.mkdir(bddStagingDir, { recursive: true });
+
+  await fs.writeFile(join(bddStagingDir, "report.md"), "# Report", "utf8");
+  const skill = "---\nname: discard-skill\n---\n# Discard";
+  await fs.writeFile(join(bddStagingDir, "prop_discard.md"), skill, "utf8");
+
+  const { sha256Hex, atomicWriteJson } = await import(
+    "../../../src/shared/fsx.js"
+  );
+  const sha = sha256Hex(skill);
+
+  const manifest = {
+    schema: "skillopt-sleep-staging",
+    schema_version: 2,
+    accepted: true,
+    has_managed_skill: true,
+    legacy: {
+      skill: {
+        proposed_file: "prop_discard.md",
+        live_path: join(
+          bddProjectDir,
+          ".omp",
+          "skills",
+          "discard-skill",
+          "SKILL.md",
+        ),
+        sha256: sha,
+      },
+    },
+  };
+  await atomicWriteJson(join(bddStagingDir, "manifest.json"), manifest);
+
+  const { ProposalRepository } = await import(
+    "../../../src/proposals/repository.js"
+  );
+  const { projectIdentity } = await import("../../../src/telemetry.js");
+  bddProjectId = projectIdentity(bddProjectDir).id;
+  bddRepo = new ProposalRepository(tempHome);
+
+  const { ProposalScanner } = await import("../../../src/proposals/scanner.js");
+  const scanner = new ProposalScanner(bddRepo);
+  bddProposals = await scanner.scanProjectProposals(
+    bddProjectDir,
+    bddProjectId,
+  );
+  assert.equal(bddProposals.length, 1);
+});
+
+When(
+  "the proposal is adopted via the CLI or discarded by the user",
+  async () => {
+    const { discardProposal } = await import(
+      "../../../src/proposals/adoption.js"
+    );
+    await discardProposal(
+      bddRepo,
+      bddProjectId,
+      bddProposals[0].id,
+      "Discarded in BDD",
+    );
+
+    bddStatusMap = new Map();
+    const fakeCtx = {
+      hasUI: true,
+      cwd: bddProjectDir,
+      ui: {
+        setStatus: (key: string, text?: string) => {
+          bddStatusMap.set(key, text);
+        },
+        notify: () => {},
+      },
+    };
+    const { updateProposalsStatusline } = await import(
+      "../../../src/extension.js"
+    );
+    bddProposals = await updateProposalsStatusline(fakeCtx as any, tempHome);
+  },
+);
+
+Then("the proposal is removed from pending proposals", () => {
+  assert.equal(bddProposals.length, 0);
+});
+
+Then("the proposals statusline is cleared", () => {
+  assert.equal(bddStatusMap.get("omp-skill-kit-proposals"), undefined);
+});
+
+Given("an invalid or corrupt session file on shutdown", async () => {
+  const fs = await import("node:fs/promises");
+  bddProjectDir = join(tempHome, "bdd-failopen-project");
+  await fs.mkdir(bddProjectDir, { recursive: true });
+  bddShutdownSessionFile = join(tempHome, "corrupt.jsonl");
+  await fs.writeFile(bddShutdownSessionFile, "CORRUPT NOT JSON", "utf8");
+});
+
+When("session shutdown is handled by the extension", async () => {
+  let shutdownHandler: any;
+  const fakeApi = {
+    on: (name: string, handler: any) => {
+      if (name === "session_shutdown") shutdownHandler = handler;
+    },
+    registerCommand: () => {},
+  };
+  extension(fakeApi as any);
+
+  const fakeCtx = {
+    hasUI: false,
+    cwd: bddProjectDir,
+    clearTimer: () => {},
+    sessionManager: {
+      getSessionFile: () => bddShutdownSessionFile,
+    },
+  };
+
+  try {
+    await shutdownHandler({ type: "session_shutdown" }, fakeCtx);
+    bddShutdownThrew = false;
+  } catch {
+    bddShutdownThrew = true;
+  }
+});
+
+Then("the extension logs the rejection fail-open without throwing", () => {
+  assert.equal(bddShutdownThrew, false);
 });

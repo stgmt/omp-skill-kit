@@ -15,3 +15,8 @@ reports/
 *.tar.gz
 *.tar.gz.sha256
 /.specs/
+.omp/
+.githooks/
+__pycache__/
+*.pyc
+*.pyo
