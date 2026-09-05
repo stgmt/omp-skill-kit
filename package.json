@@ -1,6 +1,6 @@
 {
   "name": "omp-skill-kit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Native OMP plugin: background mega-tron skill routing and SkillOpt-Sleep proposals with names-only prompt hints.",
   "type": "module",
   "private": true,
