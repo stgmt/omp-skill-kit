@@ -10,6 +10,38 @@ import { projectIdentity } from "../telemetry.js";
 import { ProposalRepository } from "./repository.js";
 import { normalizeProjectPath } from "./session-source.js";
 
+/**
+ * Build the concrete model chain for a SkillOpt run from config entries.
+ * Supports "current" (live session model), "@role" specs resolved through
+ * the passed resolver (usually the OMP model registry), and explicit model
+ * ids passed through as-is. Unresolvable and duplicate entries are dropped,
+ * order preserved.
+ */
+export function resolveModelChain(
+  entries: string[],
+  currentModelId: string | undefined,
+  resolveSpec: (spec: string) => string | undefined,
+): string[] {
+  const chain: string[] = [];
+  for (const raw of entries) {
+    const spec = raw.trim();
+    if (!spec) {
+      continue;
+    }
+    const resolved =
+      spec === "current"
+        ? currentModelId?.trim()
+        : spec.startsWith("@")
+          ? resolveSpec(spec)
+          : spec;
+    const id = resolved?.trim();
+    if (id && !chain.includes(id)) {
+      chain.push(id);
+    }
+  }
+  return chain;
+}
+
 export function launchProposalWorker(
   home: string,
   options: {
@@ -18,7 +50,7 @@ export function launchProposalWorker(
     projectId: string;
     projectRoot: string;
     profileRoot: string;
-    model: string;
+    models: string[];
   },
 ): number {
   const logsDir = join(home, "logs");
@@ -42,7 +74,8 @@ export function launchProposalWorker(
       "--profile-root",
       options.profileRoot,
       "--model",
-      options.model,
+      options.models[0],
+      ...options.models.slice(1).flatMap((m) => ["--fallback-model", m]),
     ],
     {
       env: {
@@ -92,6 +125,7 @@ export class ProposalService {
   async schedule(params: {
     cwd: string;
     model?: string;
+    fallbackModels?: string[];
     profileRoot?: string;
   }): Promise<{ scheduled: boolean; pid?: number; reason?: string }> {
     const store = new StateStore(this.home);
@@ -105,8 +139,14 @@ export class ProposalService {
       return { scheduled: false, reason: "python_not_found" };
     }
 
-    const model = params.model?.trim();
-    if (!model) {
+    const models = [
+      ...new Set(
+        [params.model, ...(params.fallbackModels ?? [])]
+          .map((m) => m?.trim())
+          .filter((m): m is string => !!m),
+      ),
+    ];
+    if (models.length === 0) {
       return { scheduled: false, reason: "no_model_selected" };
     }
 
@@ -135,7 +175,7 @@ export class ProposalService {
         projectId: project.id,
         projectRoot,
         profileRoot,
-        model,
+        models,
       });
       return { scheduled: true, pid, reason: "reconciliation" };
     }
@@ -167,7 +207,7 @@ export class ProposalService {
       projectId: project.id,
       projectRoot,
       profileRoot,
-      model,
+      models,
     });
     return { scheduled: true, pid };
   }

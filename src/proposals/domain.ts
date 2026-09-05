@@ -92,6 +92,7 @@ export interface ProposalConfig {
   batchSize: number;
   minimumIntervalHours: number;
   model: string;
+  fallbackModels: string[];
   autoAdopt: boolean;
 }
 
@@ -100,6 +101,7 @@ export const DEFAULT_PROPOSAL_CONFIG: ProposalConfig = {
   enabled: true,
   batchSize: 5,
   minimumIntervalHours: 24,
-  model: "current",
+  model: "@smol",
+  fallbackModels: ["current"],
   autoAdopt: false,
 };

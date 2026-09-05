@@ -55,7 +55,8 @@ export async function ensureProposalsConfig(home: string): Promise<void> {
       enabled: true,
       batchSize: 5,
       minimumIntervalHours: 24,
-      model: "current",
+      model: "@smol",
+      fallbackModels: ["current"],
       autoAdopt: false,
     };
     await atomicWriteJson(userConfigPath, userConfig);

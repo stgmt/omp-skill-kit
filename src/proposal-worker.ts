@@ -19,11 +19,17 @@ function parseArgs(): {
   projectRoot: string;
   profileRoot: string;
   model: string;
+  fallbackModels: string[];
 } {
   const args = argv.slice(2);
   const flags: Record<string, string> = {};
+  const fallbackModels: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === "--fallback-model" && i + 1 < args.length) {
+      fallbackModels.push(args[++i]);
+      continue;
+    }
     if (arg.startsWith("--") && i + 1 < args.length) {
       flags[arg.slice(2)] = args[++i];
     }
@@ -59,6 +65,7 @@ function parseArgs(): {
     projectRoot,
     profileRoot,
     model,
+    fallbackModels,
   };
 }
 
@@ -170,13 +177,17 @@ export async function runProposalWorker(): Promise<void> {
       python: options.python,
     });
 
-    const result = await proc.run({
-      projectId: options.projectId,
-      projectRoot: options.projectRoot,
-      profileRoot: options.profileRoot,
-      model: options.model,
-      sessions: batch,
-    });
+    const result = await proc.run(
+      {
+        projectId: options.projectId,
+        projectRoot: options.projectRoot,
+        profileRoot: options.profileRoot,
+        model: options.model,
+        sessions: batch,
+      },
+      options.fallbackModels,
+    );
+    runRecord.model = result.model ?? runRecord.model;
 
     // 6. Record final outcomes and update schedule
     const completedAt = new Date().toISOString();

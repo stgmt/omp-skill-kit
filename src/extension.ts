@@ -23,10 +23,14 @@ import {
   maybeBackfillProjectSessions,
   resolveProfileSessionsRoot,
 } from "./proposals/backfill.js";
-import type { CompletedSession, Proposal } from "./proposals/domain.js";
+import type {
+  CompletedSession,
+  Proposal,
+  ProposalConfig,
+} from "./proposals/domain.js";
 import { ProposalRepository } from "./proposals/repository.js";
 import { ProposalScanner } from "./proposals/scanner.js";
-import { ProposalService } from "./proposals/service.js";
+import { ProposalService, resolveModelChain } from "./proposals/service.js";
 import { validateAndParseSessionFile } from "./proposals/session-source.js";
 import { promptHash, RouterClient } from "./router-client.js";
 import {
@@ -300,6 +304,25 @@ export function startProposalsTimer(
   }, 10_000);
 }
 
+/**
+ * Build the concrete model chain for a SkillOpt run from the user config.
+ * "current" resolves to the live session model, "@role" specs resolve
+ * through ctx.models like core selection does, explicit ids pass through.
+ */
+export function resolveProposalModels(
+  ctx: ExtensionContext,
+  config: ProposalConfig,
+): string[] {
+  const entries = [config.model, ...(config.fallbackModels ?? [])];
+  return resolveModelChain(entries, ctx.model?.id, (spec) => {
+    try {
+      return ctx.models?.resolve?.(spec)?.id;
+    } catch {
+      return undefined;
+    }
+  });
+}
+
 export function helpText(home: string): string {
   const paths = getComponentLogPaths(home);
   return [
@@ -361,7 +384,10 @@ export async function statusText(
       const lastOutcome = schedule?.lastStatus ?? "none";
       const config = await repo.getUserConfig();
       const batchSize = Math.max(1, config.batchSize ?? 1);
-      proposalSummary = `; proposals=${proposals.length}; sessions=${pendingSessions.length}/${batchSize}; lastRun=${lastOutcome}; workerLog=${paths.proposalWorkerLog}`;
+      const modelChain = [config.model, ...(config.fallbackModels ?? [])]
+        .map((m) => m.trim())
+        .filter((m) => m.length > 0);
+      proposalSummary = `; proposals=${proposals.length}; sessions=${pendingSessions.length}/${batchSize}; model=${modelChain.join("+") || "none"}; lastRun=${lastOutcome}; workerLog=${paths.proposalWorkerLog}`;
     } catch {
       // ignore
     }
@@ -604,11 +630,17 @@ export async function startOrObserveInstallation(
       await openDashboard(ctx, home, diag);
     }
     if (activeContext) {
+      const readyRepo = new ProposalRepository(home);
+      const readyChain = resolveProposalModels(
+        activeContext,
+        await readyRepo.getUserConfig(),
+      );
       const service = new ProposalService({ home, pluginRoot: pluginRoot() });
       await service
         .schedule({
           cwd: activeContext.cwd,
-          model: activeContext.model?.id || "",
+          model: readyChain[0] ?? "",
+          fallbackModels: readyChain.slice(1),
         })
         .catch(logFailOpen);
     }
@@ -989,11 +1021,12 @@ export default function extension(pi: ExtensionAPI): void {
         pluginRoot: pluginRoot(),
         repo,
       });
-      const currentModel = ctx.model?.id || "";
+      const chain = resolveProposalModels(ctx, await repo.getUserConfig());
       await service
         .schedule({
           cwd: ctx.cwd,
-          model: currentModel,
+          model: chain[0] ?? "",
+          fallbackModels: chain.slice(1),
         })
         .catch(logFailOpen);
     } catch (err) {
@@ -1021,11 +1054,12 @@ export default function extension(pi: ExtensionAPI): void {
         pluginRoot: pluginRoot(),
         repo,
       });
-      const currentModel = ctx.model?.id || "";
+      const chain = resolveProposalModels(ctx, await repo.getUserConfig());
       await service
         .schedule({
           cwd: ctx.cwd,
-          model: currentModel,
+          model: chain[0] ?? "",
+          fallbackModels: chain.slice(1),
         })
         .catch(logFailOpen);
     } catch (err) {

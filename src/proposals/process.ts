@@ -15,6 +15,8 @@ export interface SkillOptRunResult {
   outcome: SessionOutcome;
   rawJson?: Record<string, unknown>;
   error?: string;
+  /** Concrete model id that produced this result. */
+  model?: string;
 }
 
 export function redactSecrets(str: string): string {
@@ -34,14 +36,48 @@ export class SkillOptProcess {
     this.python = options.python;
   }
 
-  async run(batch: SkillOptRunBatch): Promise<SkillOptRunResult> {
+  /**
+   * Run the batch, trying fallback models in order on transport failures
+   * (non-zero exit, timeout, unreadable output). Gate verdicts (analyzed /
+   * no_tasks / rejected) are final and are never retried on another model.
+   */
+  async run(
+    batch: SkillOptRunBatch,
+    fallbackModels: string[] = [],
+  ): Promise<SkillOptRunResult> {
     if (batch.sessions.length < 1) {
       return {
         outcome: "failed",
         error: `Expected at least 1 session for SkillOpt batch, got ${batch.sessions.length}`,
       };
     }
+    const models = [
+      ...new Set([batch.model, ...fallbackModels].map((m) => m.trim())),
+    ].filter((m) => m.length > 0);
+    let last: SkillOptRunResult = {
+      outcome: "failed",
+      error: "No model available for SkillOpt batch",
+    };
+    for (const model of models) {
+      const result = await this.attempt(batch, model);
+      result.model = model;
+      if (result.outcome !== "failed") {
+        return result;
+      }
+      last = result;
+      if (model !== models[models.length - 1]) {
+        console.error(
+          `[proposals] model ${model} failed, trying fallback: ${result.error}`,
+        );
+      }
+    }
+    return last;
+  }
 
+  private async attempt(
+    batch: SkillOptRunBatch,
+    model: string,
+  ): Promise<SkillOptRunResult> {
     const configPath = join(this.home, "proposals", "skillopt-config.json");
     const pluginPython = join(this.pluginRoot, "python");
     const xdgEnv = buildXdgEnv(this.home);
@@ -68,7 +104,7 @@ export class SkillOptProcess {
       "--backend",
       "pi",
       "--model",
-      batch.model,
+      model,
       "--project",
       batch.projectRoot,
       "--pi-home",
