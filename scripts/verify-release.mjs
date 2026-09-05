@@ -54,8 +54,15 @@ async function computeSkillOptTreeSha(dir) {
     .sort();
   const hash = createHash("sha256");
   for (const rel of pyFiles) {
+    const raw = await readFile(join(dir, rel));
+    // Normalize CRLF working-copy bytes to LF so the digest matches
+    // the LF-normalized git blob bytes on every OS (see .gitattributes).
+    const normalized = Buffer.from(
+      raw.toString("utf8").replace(/\r\n/g, "\n"),
+      "utf8",
+    );
     hash.update(rel);
-    hash.update(await readFile(join(dir, rel)));
+    hash.update(normalized);
   }
   return hash.digest("hex");
 }
